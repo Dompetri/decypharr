@@ -697,5 +697,13 @@ func GetTorrentFolder(folderNaming config.WebDavFolderNaming, entry *Entry) stri
 	default:
 		folder = path.Clean(entry.Name)
 	}
+	// Never return an empty/"." folder — it collapses the mount path to /__all__,
+	// which breaks browsing and makes the symlink scan walk the whole library.
+	if folder == "" || folder == "." {
+		folder = path.Clean(entry.Name)
+	}
+	if folder == "" || folder == "." {
+		folder = entry.InfoHash
+	}
 	return folder
 }

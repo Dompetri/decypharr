@@ -74,6 +74,12 @@ func (s *Server) WebRoutes() http.Handler {
 			r.Get("/repair/health/{name}", s.handleGetEntryHealth)
 			r.Post("/repair/health/{name}/check", s.handleRecheckEntry)
 
+			// Eviction (quota) — status, manual evict, archive ingestion
+			r.Get("/eviction/status/{debrid}", s.handleEvictionStatus)
+			r.Post("/eviction/evict/{hash}", s.handleForceEvict)
+			r.Post("/eviction/ingest", s.handleIngestMagnets)
+			r.Get("/eviction/ingest", s.handleIngestStatus)
+
 			// Torrent management
 			r.Get("/torrents", s.handleGetTorrents)
 			r.Delete("/torrents/{category}/{hash}", s.handleDeleteTorrent)

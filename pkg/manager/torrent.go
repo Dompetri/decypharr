@@ -70,7 +70,15 @@ func (m *Manager) doRefreshTorrents(_ context.Context, provider string, debridCl
 		return err
 	}
 
-	if len(remote) == 0 {
+	preserveOrphaned := debridClient.Config().RehydrateOrphaned
+
+	// An empty remote normally means "nothing to reconcile". But with orphan
+	// re-hydration on it may instead mean the account was swapped for an empty one,
+	// in which case every local placement has genuinely vanished and must be
+	// preserved for lazy re-add (handled in detectTorrentChanges) rather than
+	// skipped. PikPak's GetTorrents fails hard on a walk error (returns above), so
+	// an empty list here is a real empty account, not a transient read failure.
+	if len(remote) == 0 && !preserveOrphaned {
 		m.logger.Debug().Str("debrid", provider).Msg("No remote found")
 		return nil
 	}
@@ -88,7 +96,7 @@ func (m *Manager) doRefreshTorrents(_ context.Context, provider string, debridCl
 	}
 
 	// Detect changes by streaming through cached entries
-	newTorrents, torrentsToUpdate, torrentsToDelete, err := m.detectTorrentChanges(provider, remoteTorrentsByHash)
+	newTorrents, torrentsToUpdate, torrentsToDelete, err := m.detectTorrentChanges(provider, remoteTorrentsByHash, preserveOrphaned)
 	if err != nil {
 		return err
 	}
@@ -121,8 +129,31 @@ func (m *Manager) doRefreshTorrents(_ context.Context, provider string, debridCl
 	return nil
 }
 
+// canRehydrateOrphan reports whether an entry whose placement vanished from the
+// remote can be kept for lazy re-hydration instead of pruned. Limited to
+// single-provider, completed torrents with an infohash and files: multi-debrid
+// entries may still be served by another placement, and incomplete/errored
+// entries have nothing worth re-adding.
+func canRehydrateOrphan(entry *storage.Entry, provider string, pe *storage.ProviderEntry) bool {
+	if entry == nil || pe == nil {
+		return false
+	}
+	if !entry.IsTorrent() || entry.InfoHash == "" {
+		return false
+	}
+	// Only when the vanished placement is the sole, active one. With another
+	// provider present, fall through to RemoveProvider so that placement serves.
+	if entry.ActiveProvider != provider || len(entry.Providers) != 1 {
+		return false
+	}
+	if len(entry.Files) == 0 {
+		return false
+	}
+	return pe.Status == types.TorrentStatusDownloaded
+}
+
 // detectTorrentChanges streams through cached entries and detects what changed
-func (m *Manager) detectTorrentChanges(provider string, remoteTorrentsByHash map[string]*types.Torrent) (
+func (m *Manager) detectTorrentChanges(provider string, remoteTorrentsByHash map[string]*types.Torrent, preserveOrphaned bool) (
 	newTorrents []*types.Torrent,
 	torrentsToUpdate []*storage.Entry,
 	torrentsToDelete []string,
@@ -142,12 +173,43 @@ func (m *Manager) detectTorrentChanges(provider string, remoteTorrentsByHash map
 
 			if placementOnDebrid {
 				if !onRemote {
+					// We intentionally evicted this placement to free remote storage
+					// (RemovedAt set). Its absence from the remote list is expected, not
+					// a removal — keep it so the mount path resolves and the magnet can
+					// be re-added on the next read. Only genuinely-vanished placements
+					// (RemovedAt == nil) are removed/deleted.
+					if oldPlacement != nil && oldPlacement.RemovedAt != nil {
+						continue
+					}
+					// The placement vanished and we didn't evict it — the account was
+					// switched, or the file was deleted out of band. When orphan
+					// re-hydration is on, keep recoverable entries (mark the placement
+					// for lazy re-add) instead of pruning them, so a live *arr /
+					// media-server symlink doesn't break. The next read re-adds the
+					// magnet onto the current account via the eviction re-hydrate path.
+					if preserveOrphaned && canRehydrateOrphan(entry, provider, oldPlacement) {
+						now := time.Now()
+						oldPlacement.RemovedAt = &now
+						entry.UpdatedAt = now
+						torrentsToUpdate = append(torrentsToUpdate, entry)
+						m.logger.Info().
+							Str("debrid", provider).
+							Str("name", entry.Name).
+							Str("infohash", entry.InfoHash).
+							Msg("sync: placement vanished from remote; preserving for lazy re-hydration")
+						continue
+					}
 					entry.RemoveProvider(provider, nil)
 					if len(entry.Providers) == 0 {
 						torrentsToDelete = append(torrentsToDelete, entry.InfoHash)
 					} else {
 						torrentsToUpdate = append(torrentsToUpdate, entry)
 					}
+				} else if oldPlacement.RemovedAt != nil {
+					// Evicted placement reappeared on the remote (re-hydrated, or the
+					// user re-added it). Treat as a fresh placement so its ID/Files and
+					// the cleared eviction state are persisted.
+					newTorrents = append(newTorrents, currentTorrent)
 				} else if oldPlacement.NeedsUpdate(currentTorrent) {
 					// currentTorrent has changes for this provider - update placement info
 					// But the issue is that currentTorrent may not have all the metadata we need to update the placement (e.g. downloadedAt, files etc)
@@ -193,6 +255,7 @@ func (m *Manager) handleTorrentDeletions(torrentsToDelete []string) {
 				if err := m.storage.Delete(infohash); err != nil {
 					m.logger.Error().Err(err).Str("infohash", infohash).Msg("Failed to delete torrent")
 				}
+				m.clearProbeCache(infohash) // drop any retained probe slices
 			}
 		})
 	}

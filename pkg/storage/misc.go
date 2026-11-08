@@ -5,6 +5,7 @@ import (
 	"maps"
 
 	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/utils"
 )
 
 // HandleExistingEntryMerge merges an incoming entry with an existing one that
@@ -55,7 +56,31 @@ func mergeFiles(existing, incoming map[string]*File) map[string]*File {
 		}
 	}
 
-	return merged
+	return dedupeFileCopies(merged)
+}
+
+// dedupeFileCopies collapses re-add copies of the same logical file that a debrid
+// (notably PikPak) leaves behind: when it re-fetches a magnet it makes "name(1)",
+// "name(2)" siblings rather than overwriting, and merging entry snapshots across
+// re-adds otherwise accumulates them as phantom files. Files whose names match once
+// the "(N)" suffix is stripped are folded to one entry (newest AddedOn wins) under
+// the clean name. Distinct files of a multi-file torrent keep different names, so
+// they are never collapsed.
+func dedupeFileCopies(files map[string]*File) map[string]*File {
+	out := make(map[string]*File, len(files))
+	for _, f := range files {
+		if f == nil {
+			continue
+		}
+		clean := utils.NormalizeDupName(f.Name)
+		if existing, ok := out[clean]; ok && !f.AddedOn.After(existing.AddedOn) {
+			continue
+		}
+		nf := *f
+		nf.Name = clean // stable name across re-adds; the placement link still resolves
+		out[clean] = &nf
+	}
+	return out
 }
 
 func mergeTags(existing, incoming []string) []string {

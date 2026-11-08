@@ -147,6 +147,25 @@ func (m *Manager) StartWorker(ctx context.Context) error {
 			}
 		}
 
+		// Schedule quota-eviction sweep for this debrid (opt-in, quota-limited
+		// providers only). Frees remote storage by evicting oldest torrents when
+		// usage crosses the high-water mark; evicted torrents stay locally known
+		// and are re-added lazily on read.
+		if debridConfig.Eviction.Enabled {
+			if jd, err := utils.ConvertToJobDef(debridConfig.Eviction.CheckInterval); err != nil {
+				m.logger.Error().Err(err).Str("debrid", debridName).Msg("Failed to convert eviction check interval to job definition")
+			} else {
+				jobName := debridName + "-eviction"
+				if _, err := m.scheduler.NewJob(jd, gocron.NewTask(func() {
+					m.runEviction(ctx, debridConfig, debridClient)
+				}), gocron.WithContext(ctx), gocron.WithName(jobName)); err != nil {
+					m.logger.Error().Err(err).Str("debrid", debridName).Msg("Failed to create eviction job")
+				} else {
+					m.logger.Info().Str("debrid", debridName).Msgf("Eviction sweep scheduled for every %s (high=%d%% low=%d%%)", debridConfig.Eviction.CheckInterval, debridConfig.Eviction.HighWaterPercent, debridConfig.Eviction.LowWaterPercent)
+				}
+			}
+		}
+
 		// Schedule account syncTorrents job for this debrid
 		if jd, err := utils.ConvertToJobDef(config.DefaultAccountSyncInterval); err != nil {
 			m.logger.Error().Err(err).Str("debrid", debridName).Msg("Failed to convert account syncTorrents interval to job definition")
