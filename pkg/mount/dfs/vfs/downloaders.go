@@ -146,6 +146,17 @@ func (dls *Downloaders) untrackStreamLocked() {
 	dls.streamID = ""
 }
 
+// setClient records who opened this file (a "process/kind" label) for tracking.
+// No-op for an empty label so a resolved caller is never overwritten by an
+// unresolved one.
+func (dls *Downloaders) setClient(label string) {
+	if label != "" {
+		dls.mu.Lock()
+		dls.client = label
+		dls.mu.Unlock()
+	}
+}
+
 // waiter represents a caller waiting for a range to be downloaded
 type waiter struct {
 	r       ranges.Range
@@ -394,6 +405,38 @@ func (dls *Downloaders) Download(ctx context.Context, r ranges.Range) error {
 // hit reports whether r was already fully cached when the call was made,
 // checked under dls.mu.
 func (dls *Downloaders) DownloadWithPriority(ctx context.Context, r ranges.Range, priority bool) (hit bool, err error) {
+	// If the underlying file was evicted to free remote quota, re-add it BEFORE
+	// the circuit/stream machinery. Re-hydration produces no bytes for a while,
+	// which the no-progress watchdog and circuit breaker would otherwise treat as
+	// a failed download (and block the file for the whole cooldown). Doing it here
+	// keeps that wait out of the error accounting, and resets the circuit on
+	// success so a file that previously failed to re-hydrate can play again.
+	if dls.manager != nil && dls.manager.IsEvicted(dls.item.entry) {
+		// Only re-add for BODY reads. Header/tail reads (ffprobe, metadata) are
+		// served from the local probe cache by manager.Stream without a re-add, so
+		// a library scan doesn't trigger a re-download storm.
+		var size int64
+		if f, ok := dls.item.entry.Files[dls.item.filename]; ok && f != nil {
+			size = f.Size
+		}
+		start := r.Pos
+		end := r.Pos + r.Size - 1
+		if !dls.manager.ProbeCovers(dls.item.entry.InfoHash, dls.item.filename, start, end, size) {
+			fresh, err := dls.manager.EnsureHydrated(ctx, dls.item.entry)
+			if err != nil {
+				// Transient: re-add still in progress (or uncached). Surface a
+				// retryable error WITHOUT tripping the circuit so the next read retries.
+				return false, fmt.Errorf("re-hydrating evicted file: %w", err)
+			}
+			dls.mu.Lock()
+			dls.item.entry = fresh
+			dls.resetCircuitLocked()
+			dls.errorCount = 0
+			dls.lastErr = nil
+			dls.mu.Unlock()
+		}
+	}
+
 	// Circuit breaker: reject immediately if circuit is open
 	if dls.isCircuitOpen() {
 		lastErr := dls.getLastErr()

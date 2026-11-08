@@ -2,8 +2,32 @@ package utils
 
 import (
 	"path/filepath"
+	"regexp"
 	"strings"
+	"unicode/utf8"
 )
+
+// yearRegex matches a 4-digit release year (1900-2099) as a standalone token, so
+// it ignores resolutions (1080/2160) and digit runs embedded in other tokens.
+var yearRegex = regexp.MustCompile(`(^|[^0-9])(19|20)\d{2}([^0-9]|$)`)
+
+// dupSuffixRe matches a duplicate-copy suffix "(N)" appended directly before the
+// extension (e.g. PikPak's "name(2).mkv"). The leading \S guard avoids stripping a
+// parenthesised year like "Movie (2022).mkv" (which has a space before the paren).
+var dupSuffixRe = regexp.MustCompile(`(\S)\((\d+)\)(\.[^./\\]+)?$`)
+
+// NormalizeDupName removes a "(N)" copy suffix: "name(2).mkv" -> "name.mkv". Used to
+// recognise the same logical file across re-add copies that a debrid (PikPak) makes.
+func NormalizeDupName(name string) string {
+	return dupSuffixRe.ReplaceAllString(name, "$1$3")
+}
+
+// HasYear reports whether name contains a parseable release year. *arr rejects a
+// download it can't parse, and a missing year is the usual cause, so this is used
+// to decide whether a clean file name is usable as-is or needs the release name.
+func HasYear(name string) bool {
+	return yearRegex.MatchString(name)
+}
 
 // videoExtensions is a set of known video file extensions (lowercase, without dot)
 var videoExtensions = map[string]struct{}{
@@ -48,6 +72,33 @@ func RemoveInvalidChars(value string) string {
 		}
 		return r
 	}, value)
+}
+
+// SafeFolderName converts an arbitrary release/torrent name into a single, safe
+// filesystem path component. Path separators are replaced with spaces (so a
+// dual-title release like "A / B [2025]" stays one folder instead of nesting),
+// reserved and control characters are stripped, whitespace is collapsed, and the
+// result is capped to stay within the common 255-byte name limit. The year and
+// quality tokens that *arr needs for parsing sit near the front, so they survive.
+func SafeFolderName(name string) string {
+	name = strings.NewReplacer("/", " ", "\\", " ").Replace(name)
+	name = strings.Map(func(r rune) rune {
+		if r < 32 || strings.ContainsRune(`<>:"|?*`, r) {
+			return -1
+		}
+		return r
+	}, name)
+	name = strings.Join(strings.Fields(name), " ")
+	const maxBytes = 240
+	if len(name) > maxBytes {
+		b := []byte(name)[:maxBytes]
+		// Trim back to a valid UTF-8 boundary so multi-byte runes aren't split.
+		for len(b) > 0 && !utf8.ValidString(string(b)) {
+			b = b[:len(b)-1]
+		}
+		name = strings.TrimSpace(string(b))
+	}
+	return name
 }
 
 func RemoveExtension(value string) string {

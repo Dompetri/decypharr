@@ -189,7 +189,15 @@ func (q *Queue) DeleteStalled(pending func(infoHash string) bool) error {
 			return true
 		}
 		return false
-	}, nil)
+	}, func(t *storage.Entry) error {
+		q.logger.Info().
+			Str("name", t.Name).
+			Str("infohash", t.InfoHash).
+			Str("state", string(t.State)).
+			Time("added_on", t.AddedOn).
+			Msg("Removing stalled entry from queue")
+		return nil
+	})
 }
 
 func (q *Queue) Update(torrent *storage.Entry) error {

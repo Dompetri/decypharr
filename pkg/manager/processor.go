@@ -355,6 +355,21 @@ func (m *Manager) processAction(entry *storage.Entry) {
 		entry = storage.HandleExistingEntryMerge(existing, entry)
 	}
 
+	// Verify the content is actually retrievable before importing it. Some debrid
+	// states report a file as downloaded while exposing no usable download link
+	// (e.g. PikPak loose single-file offline downloads, whose getFile returns empty
+	// links). Symlinking such an entry yields a file the *arr can't probe and never
+	// imports, leaving the grab stuck. Instead fail it so the *arr's failed-download
+	// handling blocklists this release and grabs another.
+	if !m.waitForUsableLink(entry) {
+		m.logger.Warn().
+			Str("name", entry.Name).
+			Str("debrid", entry.ActiveProvider).
+			Msg("Download has no usable link; blocklisting so the arr grabs another release")
+		m.failUnusableDownload(entry)
+		return
+	}
+
 	// Now add entry to the main storage
 	if err := m.AddOrUpdate(entry, nil); err != nil {
 		m.logger.Error().Err(err).Str("name", entry.Name).Msg("Failed to persist completed download")
@@ -394,6 +409,7 @@ func (m *Manager) processNewTorrent(torrent *storage.Entry, debridTorrent *debri
 	// Update status to submitting
 	torrent.UpdatedAt = time.Now()
 	applyDebridTorrentToEntry(torrent, debridTorrent)
+	m.recoverFolderNameFromArr(torrent, debridTorrent)
 	_ = m.queue.Update(torrent)
 
 	if debridTorrent.Status != debridTypes.TorrentStatusDownloaded {
@@ -533,4 +549,172 @@ func (m *Manager) SendToDebrid(ctx context.Context, importRequest *ImportRequest
 	}
 	joinedErrors := errors.Join(errs...)
 	return nil, fmt.Errorf("failed to process torrent: %w", joinedErrors)
+}
+
+const (
+	usableLinkWait         = 3 * time.Minute
+	usableLinkPollInterval = 5 * time.Second
+)
+
+func (m *Manager) recoverFolderNameFromArr(entry *storage.Entry, debridTorrent *debridTypes.Torrent) {
+	if entry == nil || entry.InfoHash == "" || utils.HasYear(entry.Name) {
+		return
+	}
+	a, ok := m.arr.Get(entry.Category)
+	if !ok || a.Host == "" || a.Token == "" {
+		m.logger.Debug().
+			Str("infohash", entry.InfoHash).
+			Str("category", entry.Category).
+			Msg("No reachable arr to recover year-less release name")
+		return
+	}
+
+	want := entry.InfoHash
+	m.logger.Info().
+		Str("infohash", entry.InfoHash).
+		Str("name", entry.Name).
+		Str("arr", a.Name).
+		Str("host", a.Host).
+		Msg("Year-less name: querying arr queue to recover release title")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	for attempt := 0; attempt < 5; attempt++ {
+		queue, err := m.arr.Queue(ctx, a.Name)
+		if err == nil {
+			for _, q := range queue {
+				if !strings.EqualFold(q.DownloadId, want) {
+					continue
+				}
+				title := utils.SafeFolderName(q.Title)
+				if title == "" || !utils.HasYear(title) {
+					if q.Movie != nil && q.Movie.Title != "" && q.Movie.Year > 0 {
+						title = utils.SafeFolderName(fmt.Sprintf("%s (%d)", q.Movie.Title, q.Movie.Year))
+					}
+				}
+				if title != "" && utils.HasYear(title) {
+					m.logger.Info().
+						Str("infohash", entry.InfoHash).
+						Str("from", entry.Name).
+						Str("to", title).
+						Msg("Recovered release name from arr queue for import parsing")
+					entry.Name = title
+					entry.OriginalFilename = title
+					_ = m.queue.Update(entry)
+				} else {
+					movieTitle, movieYear := "", 0
+					if q.Movie != nil {
+						movieTitle, movieYear = q.Movie.Title, q.Movie.Year
+					}
+					m.logger.Warn().
+						Str("infohash", entry.InfoHash).
+						Str("queue_title", q.Title).
+						Str("movie_title", movieTitle).
+						Int("movie_year", movieYear).
+						Msg("Found arr queue item but no usable year in title or movie; leaving name unchanged")
+				}
+				return
+			}
+		}
+		time.Sleep(2 * time.Second)
+	}
+	m.logger.Warn().
+		Str("infohash", entry.InfoHash).
+		Str("arr", a.Name).
+		Msg("Gave up recovering release name: no matching arr queue item after retries")
+}
+
+func (m *Manager) waitForUsableLink(entry *storage.Entry) bool {
+	if entry == nil || len(entry.Files) == 0 {
+		return false
+	}
+	deadline := time.Now().Add(usableLinkWait)
+	for attempt := 1; ; attempt++ {
+		if m.hasUsableLink(entry) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			m.logger.Debug().
+				Str("name", entry.Name).
+				Msg("Download link still unresolvable after propagation window")
+			return false
+		}
+		select {
+		case <-m.ctx.Done():
+			return false
+		case <-time.After(usableLinkPollInterval):
+		}
+	}
+}
+
+func (m *Manager) hasUsableLink(entry *storage.Entry) bool {
+	if entry == nil || len(entry.Files) == 0 {
+		return false
+	}
+	name, size := "", int64(-1)
+	for n, f := range entry.Files {
+		if f != nil && !f.Deleted && f.Size > size {
+			name, size = n, f.Size
+		}
+	}
+	if name == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	dl, err := m.linkService.GetLink(ctx, entry, name)
+	if err != nil {
+		m.logger.Debug().Err(err).Str("name", entry.Name).Str("file", name).Msg("link check failed")
+		return false
+	}
+	return dl.DownloadLink != ""
+}
+
+func (m *Manager) failUnusableDownload(entry *storage.Entry) {
+	entry.MarkAsError(fmt.Errorf("%s returned no usable download link for any file", entry.ActiveProvider))
+	_ = m.queue.Update(entry)
+
+	a, ok := m.arr.Get(entry.Category)
+	if !ok || a.Host == "" || a.Token == "" {
+		m.logger.Warn().
+			Str("name", entry.Name).
+			Str("category", entry.Category).
+			Msg("No reachable arr to blocklist unusable download; left in error state")
+		return
+	}
+
+	want := entry.InfoHash
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var id int
+	for attempt := 0; attempt < 5 && id == 0; attempt++ {
+		queue, err := m.arr.Queue(ctx, a.Name)
+		if err == nil {
+			for _, q := range queue {
+				if strings.EqualFold(q.DownloadId, want) {
+					id = q.Id
+					break
+				}
+			}
+		}
+		if id == 0 {
+			time.Sleep(2 * time.Second)
+		}
+	}
+	if id == 0 {
+		m.logger.Warn().
+			Str("name", entry.Name).
+			Msg("Unusable download not found in arr queue; left in error state for failed-download handling")
+		return
+	}
+	if err := m.arr.RemoveQueueItems(ctx, a.Name, []int{id}, false); err != nil {
+		m.logger.Warn().Err(err).Str("name", entry.Name).Msg("Failed to blocklist+research unusable download")
+		return
+	}
+	m.logger.Info().
+		Str("name", entry.Name).
+		Str("arr", a.Name).
+		Msg("Blocklisted release and asked the arr to grab another")
 }

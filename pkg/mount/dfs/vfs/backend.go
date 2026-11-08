@@ -15,6 +15,9 @@ type Backend interface {
 	TrackStream(entry *storage.Entry, filename, client string) string
 	UntrackStream(streamID string)
 	OpenStreamUntrackedForCache(ctx context.Context, entry *storage.Entry, filename string, offset int64) (manager.StreamReader, error)
+	IsEvicted(entry *storage.Entry) bool
+	EnsureHydrated(ctx context.Context, entry *storage.Entry) (*storage.Entry, error)
+	ProbeCovers(infohash, filename string, start, end, fileSize int64) bool
 }
 
 var _ Backend = (*manager.Manager)(nil)

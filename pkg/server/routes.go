@@ -73,6 +73,7 @@ func (s *Server) WebRoutes() http.Handler {
 			r.Get("/repair/health", s.handleListEntryHealth)
 			r.Get("/repair/health/{name}", s.handleGetEntryHealth)
 			r.Post("/repair/health/{name}/check", s.handleRecheckEntry)
+			r.Post("/repair/rebuild-from-history", s.handleRebuildFromHistory)
 
 			// Eviction (quota) — status, manual evict, archive ingestion
 			r.Get("/eviction/status/{debrid}", s.handleEvictionStatus)

@@ -31,6 +31,9 @@ type Handle struct {
 	streamFile *vfs.StreamingFile
 	closed     atomic.Bool
 	logger     *logger.RateLimitedEvent
+	// caller is the process that opened this handle (Jellyfin, Plex, an ffmpeg
+	// trickplay/transcode, ...), resolved once at Open(). Empty when unresolved.
+	caller callerInfo
 }
 
 // Read implements DFS streaming

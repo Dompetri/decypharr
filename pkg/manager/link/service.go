@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
@@ -21,6 +23,12 @@ const (
 	MaxReinsertionAttempt = 3
 	// maxValidatedEntries caps the validated-link memo map (see GetLink).
 	maxValidatedEntries = 8192
+	// linkFetchTimeout bounds a single shared link fetch+validate. It must comfortably
+	// cover a download-link fetch plus a HEAD validation (and a possible re-insertion),
+	// while still releasing the singleflight slot if the provider hangs. The shared
+	// fetch runs on this timeout rather than a caller's context so one player that
+	// seeks/closes mid-read can't abort (and poison) the fetch for everyone else.
+	linkFetchTimeout = 2 * time.Minute
 )
 
 var (
@@ -71,17 +79,35 @@ func New(
 // GetLink fetches and validates a download link for a file in an entry.
 // Links are cached at the account level; this service only tracks validation state.
 func (s *Service) GetLink(ctx context.Context, entry *storage.Entry, filename string) (types.DownloadLink, error) {
-	// Use singleflight to deduplicate concurrent requests for the same file
-	key := entry.InfoHash + ":" + filename
-	v, err, _ := s.singleflight.Do(key, func() (any, error) {
-		return s.fetchAndValidate(ctx, entry, filename, 0)
-	})
-
-	if err != nil {
+	// Caller already gone? Don't even start.
+	if err := ctx.Err(); err != nil {
 		return emptyDownloadLink, err
 	}
 
-	return v.(types.DownloadLink), nil
+	// Use singleflight to deduplicate concurrent requests for the same file.
+	//
+	// The shared fetch/validate runs on a context DETACHED from any single caller.
+	// A media player constantly opens, seeks and drops reads; if the first caller's
+	// cancellation aborted the shared HEAD validation, every reader joined on this
+	// key would see a transient "context canceled" — which then got cached and
+	// poisoned the link permanently (instant 500 on every later read). We bound the
+	// shared work with our own timeout and let each caller wait on its own context.
+	key := entry.InfoHash + ":" + filename
+	ch := s.singleflight.DoChan(key, func() (any, error) {
+		fetchCtx, cancel := context.WithTimeout(context.Background(), linkFetchTimeout)
+		defer cancel()
+		return s.fetchAndValidate(fetchCtx, entry, filename, 0)
+	})
+
+	select {
+	case <-ctx.Done():
+		return emptyDownloadLink, ctx.Err()
+	case res := <-ch:
+		if res.Err != nil {
+			return emptyDownloadLink, res.Err
+		}
+		return res.Val.(types.DownloadLink), nil
+	}
 }
 
 // Refresh invalidates a link that failed mid-stream and fetches a replacement.
@@ -129,14 +155,21 @@ func (s *Service) fetchAndValidate(ctx context.Context, entry *storage.Entry, fi
 		if validationErr == nil {
 			return link, nil // Already validated successfully
 		}
-		// Previous validation failed - check if we should retry
-		if linkErr := GetLinkError(validationErr); linkErr != nil {
-			if linkErr.ShouldRefetch() {
-				// Invalidate and refetch
-				return s.invalidateAndRefetch(ctx, entry, link, attempt)
+		// A transient error should never have been cached, but if one slipped in
+		// (or a prior build cached it), drop it and re-validate instead of serving
+		// a permanent failure from a one-off hiccup.
+		if isTransientLinkErr(validationErr) {
+			s.validated.Delete(link.DownloadLink)
+		} else {
+			// Previous validation failed - check if we should retry
+			if linkErr := GetLinkError(validationErr); linkErr != nil {
+				if linkErr.ShouldRefetch() {
+					// Invalidate and refetch
+					return s.invalidateAndRefetch(ctx, entry, link, attempt)
+				}
 			}
+			return emptyDownloadLink, validationErr
 		}
-		return emptyDownloadLink, validationErr
 	}
 
 	// Validate the link
@@ -158,25 +191,47 @@ func (s *Service) fetchAndValidate(ctx context.Context, entry *storage.Entry, fi
 					// Account swap doesn't consume a re-insertion attempt.
 					return s.fetchAndValidate(ctx, entry, filename, attempt)
 				}
-			} else if linkErr.ShouldRefetch() || linkErr.ShouldRetry() {
+			} else if linkErr.ShouldRefetch() {
 				// Invalidate and refetch
 				return s.invalidateAndRefetch(ctx, entry, link, attempt)
 			}
 		}
 	}
 
-	// Store validation result
-	// Keys are full download URLs and links rotate on refresh/expiry, so cap
-	// the map; resetting merely costs a re-validation per link.
+	// Store validation result.
+	//
+	// Only cache TERMINAL outcomes: a successful validation, or a non-transient link
+	// error (permanent / account issue). Transient failures — caller cancellation,
+	// a deadline, or a retryable network blip — must NOT be cached: the cache-hit
+	// path returns the stored error without re-validating, so caching a one-off
+	// hiccup turns it into a permanent 500 for every future read of this link.
 	if s.validated.Size() > maxValidatedEntries {
 		s.validated.Clear()
 	}
-	s.validated.Store(link.DownloadLink, validationErr)
+	if validationErr == nil || !isTransientLinkErr(validationErr) {
+		s.validated.Store(link.DownloadLink, validationErr)
+	}
 
 	if validationErr == nil {
 		return link, nil
 	}
 	return emptyDownloadLink, validationErr
+}
+
+// isTransientLinkErr reports whether err is a transient validation failure that
+// must not be cached: caller cancellation/deadline, or a retryable network error.
+// Permanent and account-level errors are terminal and safe to cache.
+func isTransientLinkErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	if linkErr := GetLinkError(err); linkErr != nil && linkErr.ShouldRetry() {
+		return true
+	}
+	return false
 }
 
 func (s *Service) handleBadLink(ctx context.Context, err error, entry *storage.Entry, dl types.DownloadLink, attempt int) (types.DownloadLink, error) {
@@ -337,6 +392,12 @@ func (s *Service) getPlacementFile(entry *storage.Entry, filename string) (*stor
 				"refresh_failed",
 			)
 		}
+		if refreshed == nil {
+			return nil, NewPermanentError(
+				fmt.Errorf("entry %s disappeared on refresh", entry.InfoHash),
+				"entry_disappeared",
+			)
+		}
 
 		file := refreshed.Files[filename]
 		if file == nil {
@@ -368,7 +429,10 @@ func (s *Service) getPlacementFile(entry *storage.Entry, filename string) (*stor
 	return placementFile, nil
 }
 
-// validateLink validates a download link by making a HEAD request
+// validateLink validates a download link with a tiny ranged GET. A HEAD would be
+// cheaper, but some hosts — notably PikPak's WebDAV serving host, which 302-
+// redirects to a node — answer HEAD with 403 while serving GET fine. A 1-byte
+// ranged GET is the portable probe: a range-honoring host replies 206, others 200.
 func (s *Service) validateLink(ctx context.Context, link *types.DownloadLink) error {
 	if link == nil {
 		return NewPermanentError(ErrEmptyLink, "empty_link")
@@ -377,24 +441,34 @@ func (s *Service) validateLink(ctx context.Context, link *types.DownloadLink) er
 		return NewPermanentError(fmt.Errorf("download url is empty for %s||%s", link.Filename, link.Link), "empty_link")
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "HEAD", link.DownloadLink, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, link.DownloadLink, nil)
 	if err != nil {
 		return NewPermanentError(
-			fmt.Errorf("failed to create HEAD request: %w", err),
+			fmt.Errorf("failed to create validation request: %w", err),
 			"request_creation_failed",
 		)
 	}
+	// Ask for a single byte so a Range-honoring host doesn't stream the whole file.
+	req.Header.Set("Range", "bytes=0-0")
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
+		// A cancelled/expired context is the caller going away (seek/close), not a
+		// link problem. Surface it as-is so it's treated as transient and never
+		// cached as a validation failure.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		return NewRetryableError(
-			fmt.Errorf("HEAD request failed: %w", err),
+			fmt.Errorf("validation request failed: %w", err),
 			"network_error",
 		)
 	}
 	defer resp.Body.Close()
+	// Drain the at-most-1-byte body so the connection can be reused.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1))
 
-	if resp.StatusCode == http.StatusOK {
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent {
 		return nil
 	}
 

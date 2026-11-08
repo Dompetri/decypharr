@@ -3,6 +3,7 @@ package qbit
 import (
 	"errors"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -202,6 +203,7 @@ func (q *QBit) handleTorrentsDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, hash := range hashes {
+		q.logTorrentDeletion(hash)
 		err := q.manager.Queue().Delete(hash, deleteFiles, nil)
 		if err != nil && !strings.Contains(err.Error(), "not found") {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -210,6 +212,36 @@ func (q *QBit) handleTorrentsDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// logTorrentDeletion records who/what is being removed through the qbit API.
+// Deleting a torrent also wipes its download folder, so a delete that arrives
+// while unimported files are still sitting there means the *arr removed the
+// download without ever importing it — most commonly because its history
+// already marks this infohash as imported (a previous grab of the same
+// release), or because the import was rejected (e.g. custom-format score).
+// Without this log the whole cycle is invisible on both sides.
+func (q *QBit) logTorrentDeletion(hash string) {
+	entry, err := q.manager.Queue().GetTorrent(hash)
+	if err != nil || entry == nil {
+		return
+	}
+	evt := q.logger.Info()
+	if dir := entry.DownloadPath(); dir != "" {
+		if items, rerr := os.ReadDir(dir); rerr == nil && len(items) > 0 {
+			names := make([]string, 0, len(items))
+			for _, it := range items {
+				names = append(names, it.Name())
+			}
+			evt = q.logger.Warn().Strs("unimported_files", names)
+		}
+	}
+	evt.
+		Str("hash", hash).
+		Str("name", entry.Name).
+		Str("category", entry.Category).
+		Str("state", string(entry.State)).
+		Msg("Deleting torrent via qbit api")
 }
 
 func (q *QBit) handleTorrentsPause(w http.ResponseWriter, r *http.Request) {

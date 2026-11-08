@@ -1219,6 +1219,14 @@ func (item *CacheItem) StopDownloaders() {
 	}
 }
 
+// SetClient labels the item's stream with who opened it (a "process/kind" label)
+// for tracking/stats. Safe to call at Open() before any download starts.
+func (item *CacheItem) SetClient(label string) {
+	if dls := item.downloaders.Load(); dls != nil {
+		dls.setClient(label)
+	}
+}
+
 // ReadAt reads from the sparse file, downloading if needed.
 // Uses context.Background() — prefer ReadAtContext when a caller context is available.
 func (item *CacheItem) ReadAt(p []byte, off int64) (int, error) {

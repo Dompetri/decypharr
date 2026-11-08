@@ -64,6 +64,12 @@ func (f *StreamingFile) ReadAtContext(ctx context.Context, p []byte, off int64) 
 	return n, err
 }
 
+// SetClient labels this file's stream with who opened it (a "process/kind"
+// label), for tracking/stats. Called once at Open() from the FUSE handle.
+func (f *StreamingFile) SetClient(label string) {
+	f.item.SetClient(label)
+}
+
 // Size returns the file size
 func (f *StreamingFile) Size() int64 {
 	return f.fileSize

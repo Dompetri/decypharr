@@ -50,6 +50,14 @@ type QueueSchema struct {
 	OutputPath                          string `json:"outputPath"`
 	EpisodeHasFile                      bool   `json:"episodeHasFile"`
 	Id                                  int    `json:"id"`
+	// MovieId and the linked Movie are only present when the queue is fetched with
+	// includeMovie=true (Radarr). The Movie carries a clean title+year, which is
+	// more reliable than the release-title field that can be blank or year-less.
+	MovieId int `json:"movieId"`
+	Movie   *struct {
+		Title string `json:"title"`
+		Year  int    `json:"year"`
+	} `json:"movie,omitempty"`
 }
 
 // catalogMatchers are the predicates for the built-in cleanup rules, keyed by
@@ -93,7 +101,11 @@ func (s *Service) Queue(ctx context.Context, name string) ([]QueueSchema, error)
 
 	items := make([]QueueSchema, 0)
 	for page := 1; ; page++ {
-		query := url.Values{"page": {strconv.Itoa(page)}, "pageSize": {"200"}}
+		query := url.Values{
+			"page":         {strconv.Itoa(page)},
+			"pageSize":     {"200"},
+			"includeMovie": {"true"},
+		}
 		var response QueueResponseScheme
 		resp, err := s.get(ctx, instance, "api/v3/queue?"+query.Encode(), &response)
 		if err != nil {
@@ -190,6 +202,12 @@ func resolveQueueAction(item QueueSchema, rules []config.QueueCleanupRule) Queue
 		}
 	}
 	return QueueActionNone
+}
+
+// RemoveQueueItems blocklists and removes queue items. skipRedownload keeps the
+// Arr from searching for a replacement.
+func (s *Service) RemoveQueueItems(ctx context.Context, name string, ids []int, skipRedownload bool) error {
+	return s.removeQueueItems(ctx, name, ids, skipRedownload)
 }
 
 // removeQueueItems blocklists and removes queue items. skipRedownload keeps the

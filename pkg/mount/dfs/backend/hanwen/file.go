@@ -119,6 +119,24 @@ func (f *File) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 		streamFile: reader,
 		logger:     log,
 	}
+	// Resolve who is opening this file (Jellyfin/Plex/ffmpeg) and what kind of
+	// access it is (plain read vs trickplay/transcode). Captured at Open() because
+	// the reads themselves may come from kernel readahead, not the real caller.
+	if ci, ok := callerProcess(ctx); ok {
+		fh.caller = ci
+		log.Debug().
+			Str("file", info.Name()).
+			Uint32("pid", ci.Pid).
+			Str("process", ci.Comm).
+			Str("kind", classifyCall(ci)).
+			Str("cmdline", ci.Cmdline).
+			Msg("DFS open")
+		// Surface the caller in stream tracking/stats. Only when resolved, so an
+		// unresolved caller never overwrites "DFS".
+		if ci.Comm != "" && reader != nil {
+			reader.SetClient(ci.label())
+		}
+	}
 	return fh, 0, 0
 }
 
