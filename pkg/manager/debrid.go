@@ -3,12 +3,14 @@ package manager
 import (
 	"cmp"
 	"errors"
+	"net/http"
 
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
 	"github.com/sirrobot01/decypharr/pkg/debrid/providers/alldebrid"
 	"github.com/sirrobot01/decypharr/pkg/debrid/providers/debridlink"
+	"github.com/sirrobot01/decypharr/pkg/debrid/providers/pikpak"
 	"github.com/sirrobot01/decypharr/pkg/debrid/providers/premiumize"
 	"github.com/sirrobot01/decypharr/pkg/debrid/providers/realdebrid"
 	"github.com/sirrobot01/decypharr/pkg/debrid/providers/torbox"
@@ -27,6 +29,46 @@ func (m *Manager) ProviderClient(name string) debrid.Client {
 		return nil
 	}
 	return client
+}
+
+// streamClientFor returns the http client to stream a provider's downloads with.
+// A debrid configured with a proxy gets its own client bound to that proxy (so
+// only that provider's byte transfers take the detour); everything else shares
+// the default stream client. Clients are cached per proxy URL.
+func (m *Manager) streamClientFor(provider string, viaProxy bool) *http.Client {
+	c := m.ProviderClient(provider)
+	if c == nil {
+		return m.streamClient
+	}
+	cfg := c.Config()
+	// Per-link override: this specific link must be fetched through the proxy (e.g.
+	// a PikPak fallback web link that is region-throttled unless proxied), even when
+	// the provider streams direct by default.
+	if viaProxy && cfg.Proxy != "" {
+		return m.proxiedStreamClient(cfg.Proxy)
+	}
+	// StreamDirect: the proxy is for the API/link resolution only; bytes stream
+	// direct. PikPak's region cap is set at resolve time, so a link resolved via
+	// the (Asia) proxy downloads at full speed direct — and skips a slow/costly
+	// proxy hop on the bulk transfer.
+	if cfg.StreamDirect {
+		return m.streamClient
+	}
+	proxyURL := cfg.Proxy
+	if proxyURL == "" {
+		return m.streamClient
+	}
+	return m.proxiedStreamClient(proxyURL)
+}
+
+// proxiedStreamClient returns (and caches) a stream client bound to proxyURL.
+func (m *Manager) proxiedStreamClient(proxyURL string) *http.Client {
+	if existing, ok := m.providerStreamClients.Load(proxyURL); ok {
+		return existing
+	}
+	client := &http.Client{Timeout: 0, Transport: newStreamTransport(proxyURL)}
+	actual, _ := m.providerStreamClients.LoadOrStore(proxyURL, client)
+	return actual
 }
 
 func (m *Manager) initDebridClients() {
@@ -67,6 +109,8 @@ func (m *Manager) createClient(dc config.Debrid) (debrid.Client, error) {
 		client, err = debridlink.New(dc, rateLimits)
 	case "premiumize":
 		client, err = premiumize.New(dc, rateLimits)
+	case "pikpak":
+		client, err = pikpak.New(dc, rateLimits)
 	default:
 		return nil, ErrUnsupportedDebridProvider
 	}

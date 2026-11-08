@@ -17,6 +17,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"go.uber.org/ratelimit"
+	"golang.org/x/net/http2"
 	"golang.org/x/net/proxy"
 )
 
@@ -247,6 +248,20 @@ func New(options ...ClientOption) *Client {
 		// Configure proxy if needed
 		SetProxy(transport, client.proxy)
 
+		// Actively health-check HTTP/2 connections. Some providers (e.g. PikPak,
+		// behind a load balancer) cap each connection at ~2000 streams and then send
+		// GOAWAY / reset it; without pings the transport can keep handing out a
+		// connection the server has silently dropped, so requests fail intermittently
+		// for hours until the process is restarted. ReadIdleTimeout makes the client
+		// ping an otherwise-quiet connection and drop it if unanswered, so a fresh one
+		// is dialed instead.
+		if h2, h2err := http2.ConfigureTransports(transport); h2err != nil {
+			client.logger.Debug().Err(h2err).Msg("http2 transport configure failed; using defaults")
+		} else if h2 != nil {
+			h2.ReadIdleTimeout = 30 * time.Second
+			h2.PingTimeout = 15 * time.Second
+		}
+
 		// Set the transport to the client
 		client.httpClient.Transport = transport
 	}
@@ -321,6 +336,21 @@ func SetProxy(transport *http.Transport, proxyURL string) {
 				transport.Proxy = http.ProxyURL(_proxy)
 			}
 		}
+
+		// Force HTTP/1.1 through proxies, for throughput and for reliability.
+		//
+		// Throughput: over a CONNECT tunnel Go negotiates HTTP/2 via ALPN, which
+		// multiplexes *every* request onto one TCP connection — so parallel range
+		// reads collapse into a single connection's bandwidth (a flat ~50 Mbps)
+		// instead of fanning out across many. HTTP/1.1 opens a connection per
+		// concurrent request, restoring the parallelism throughput scales with.
+		//
+		// Reliability: a long-lived multiplexed h2 connection that dies silently
+		// (no FIN — common with commercial proxies dropping idle tunnels) leaves the
+		// client hanging on every subsequent request with "http2: timeout awaiting
+		// response headers". HTTP/1.1 connections fail fast and get replaced.
+		transport.ForceAttemptHTTP2 = false
+		transport.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
 	} else {
 		transport.Proxy = http.ProxyFromEnvironment
 	}

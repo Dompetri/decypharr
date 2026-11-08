@@ -157,6 +157,11 @@ func (m *Manager) TrackStream(entry *storage.Entry, filename, client string) str
 		debrid = entry.ActiveProvider
 	}
 
+	// Mark as recently streamed so the archive sweep keeps it resident.
+	if entry.InfoHash != "" {
+		m.lastStreamed.Store(entry.InfoHash, time.Now().Unix())
+	}
+
 	return m.registerStream(entry, filename, file, source, debrid, client)
 }
 

@@ -29,3 +29,7 @@ node_modules/
 *.prof
 .codex/
 .claude/
+*.exe
+*.exe~
+.run-data/
+

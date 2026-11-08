@@ -18,6 +18,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
+	"github.com/sirrobot01/decypharr/internal/request"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	"github.com/sirrobot01/decypharr/pkg/arr/reacquire"
@@ -36,6 +37,43 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
+// newStreamTransport builds the streaming transport. proxyURL is optional: when
+// set, the transport routes through that proxy (http:// or socks5://) and bounds
+// concurrency — a proxied path funnels every connection through one upstream, and
+// providers like PikPak only serve a handful of connections per source IP, so the
+// unbounded 500-conn pool used for direct streaming would overwhelm it and stall.
+func newStreamTransport(proxyURL string) *http.Transport {
+	dialer := &net.Dialer{
+		Timeout:   5 * time.Second,  // Fast connection timeout
+		KeepAlive: 30 * time.Second, // Keep connections alive
+	}
+
+	t := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+			MinVersion:         tls.VersionTLS12,
+			ClientSessionCache: tls.NewLRUClientSessionCache(200),
+		},
+		TLSHandshakeTimeout:    20 * time.Second,
+		MaxIdleConns:           1000,
+		MaxIdleConnsPerHost:    500,
+		MaxConnsPerHost:        500,
+		IdleConnTimeout:        120 * time.Second,
+		DisableCompression:     false,
+		DialContext:            dialer.DialContext,
+		Proxy:                  http.ProxyFromEnvironment,
+		MaxResponseHeaderBytes: 1 << 20,   // 1MB header buffer for CDN responses
+		WriteBufferSize:        32 << 10,  // requests are tiny
+		ReadBufferSize:         256 << 10, // caps how much a single body.Read can return
+	}
+	if proxyURL != "" {
+		request.SetProxy(t, proxyURL)
+		t.MaxConnsPerHost = 64
+		t.MaxIdleConnsPerHost = 64
+	}
+	return t
+}
+
 // Manager handles unified torrent management - replaces wire.Store completely
 type Manager struct {
 	storage      *storage.Storage
@@ -49,6 +87,29 @@ type Manager struct {
 	ready        chan struct{}
 	readyOnce    sync.Once
 	streamClient *http.Client
+	// Per-provider stream clients, keyed by proxy URL. A debrid with a configured
+	// proxy streams through it instead of the shared client, so only that
+	// provider's downloads take the detour.
+	providerStreamClients *xsync.Map[string, *http.Client]
+
+	// In-flight lazy re-hydrations of evicted entries, keyed by InfoHash, so
+	// simultaneous reads of the same evicted file trigger a single re-add.
+	rehydrateMu sync.Mutex
+	rehydrating map[string]*rehydrateCall
+
+	// Rate-limits distinct re-add attempts so a burst of reads touching many
+	// evicted/orphaned files at once (e.g. a library scan) doesn't stampede the
+	// provider. Excess attempts return a retryable error and are not re-added.
+	rehydrateThrottle *rehydrateThrottle
+
+	// Guards against overlapping eviction/archive sweeps (a slow sweep must not
+	// run concurrently with the next scheduled run).
+	evictionRunning atomic.Bool
+
+	// Archive ingestion: queue lock + recently-submitted infohashes (suppresses
+	// re-submitting before the provider creates the entry).
+	ingestMu        sync.Mutex
+	ingestSubmitted map[string]int64 // infohash -> submit unix timestamp
 
 	arrRecoveryMu          sync.RWMutex
 	arrRecovery            ArrRecovery
@@ -139,35 +200,9 @@ func New() *Manager {
 	// Initialize debrid registry
 	ctx := context.Background()
 
-	// Optimized transport for high-performance streaming with HTTP/2 multiplexing
-	// DNS resolver with caching
-	dialer := &net.Dialer{
-		Timeout:   5 * time.Second,  // Fast connection timeout
-		KeepAlive: 30 * time.Second, // Keep connections alive
-	}
-
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
-			MinVersion:         tls.VersionTLS12,
-			ClientSessionCache: tls.NewLRUClientSessionCache(200),
-		},
-		TLSHandshakeTimeout:    20 * time.Second,
-		MaxIdleConns:           1000,
-		MaxIdleConnsPerHost:    500,
-		MaxConnsPerHost:        500,
-		IdleConnTimeout:        120 * time.Second,
-		DisableCompression:     false, // Enable compression for better multiplexing
-		DialContext:            dialer.DialContext,
-		Proxy:                  http.ProxyFromEnvironment,
-		MaxResponseHeaderBytes: 1 << 20,   // 1MB header buffer for CDN responses
-		WriteBufferSize:        32 << 10,  // requests are tiny
-		ReadBufferSize:         256 << 10, // caps how much a single body.Read can return
-	}
-
 	streamClient := &http.Client{
 		Timeout:   0,
-		Transport: transport,
+		Transport: newStreamTransport(""),
 	}
 
 	usenetTimeout, err := utils.ParseDuration(cfg.Usenet.ProcessingTimeout)
@@ -186,6 +221,10 @@ func New() *Manager {
 		ctx:                    ctx,
 		ready:                  make(chan struct{}),
 		streamClient:           streamClient,
+		providerStreamClients:  xsync.NewMap[string, *http.Client](),
+		rehydrating:            make(map[string]*rehydrateCall),
+		rehydrateThrottle:      newRehydrateThrottle(rehydrateBurstWindow, rehydrateBurstLimit),
+		ingestSubmitted:        make(map[string]int64),
 		usenetTimeout:          usenetTimeout,
 		debridSpeedTestResults: xsync.NewMap[string, debridTypes.SpeedTestResult](),
 		activeStreams:          xsync.NewMap[string, *ActiveStream](),

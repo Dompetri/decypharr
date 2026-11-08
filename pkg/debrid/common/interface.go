@@ -34,3 +34,11 @@ type Client interface {
 	SpeedTest(ctx context.Context) types.SpeedTestResult
 	SupportsCheck() bool
 }
+
+// QuotaReporter is an optional capability implemented by providers that expose a
+// finite storage quota (e.g. PikPak). The eviction sweep type-asserts a Client
+// to this interface; providers without a storage quota simply don't implement it.
+type QuotaReporter interface {
+	// StorageQuota returns used and total bytes for the account's stored files.
+	StorageQuota(ctx context.Context) (used, limit int64, err error)
+}

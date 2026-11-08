@@ -23,6 +23,7 @@ Usenet streaming.
 - [Debrid Link](https://debrid-link.com)
 - [All Debrid](https://alldebrid.com)
 - [Premiumize](https://www.premiumize.me)
+- [PikPak](https://mypikpak.com) (enter credentials as `username:password` in the API key field)
 
 ## Quick Start
 

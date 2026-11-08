@@ -625,6 +625,7 @@ class ConfigManager {
                                 <option value="debridlink">Debrid Link</option>
                                 <option value="torbox">Torbox</option>
                                 <option value="premiumize">Premiumize</option>
+                                <option value="pikpak">PikPak</option>
                             </select>
                         </div>
                         

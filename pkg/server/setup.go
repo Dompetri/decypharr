@@ -146,10 +146,16 @@ func (s *Server) setupCompleteHandler(w http.ResponseWriter, r *http.Request) {
 				"debridlink": true,
 				"torbox":     true,
 				"premiumize": true,
+				"pikpak":     true,
 			}
 
 			if !validProviders[req.Debrid.Provider] {
 				return fmt.Errorf("Invalid debrid provider")
+			}
+
+			downloadUncached := false
+			if req.Debrid.Provider == "pikpak" {
+				downloadUncached = true
 			}
 
 			debrid := config.Debrid{
@@ -157,7 +163,7 @@ func (s *Server) setupCompleteHandler(w http.ResponseWriter, r *http.Request) {
 				Name:             req.Debrid.Provider,
 				APIKey:           req.Debrid.APIKey,
 				DownloadAPIKeys:  []string{req.Debrid.APIKey},
-				DownloadUncached: false,
+				DownloadUncached: downloadUncached,
 				RateLimit:        config.DefaultRateLimit,
 			}
 

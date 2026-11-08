@@ -49,6 +49,7 @@ export default defineConfig({
                         {label: 'All Debrid', link: '/guides/debrid/all-debrid'},
                         {label: 'Debrid Link', link: '/guides/debrid/debrid-link'},
                         {label: 'Torbox', link: '/guides/debrid/torbox'},
+                        {label: 'PikPak', link: '/guides/debrid/pikpak'},
                     ],
                 },
                 {

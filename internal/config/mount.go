@@ -66,6 +66,21 @@ type DFS struct {
 	ChunkSize     string `json:"chunk_size,omitempty"`      // Initial chunk size, e.g 10MB
 	ReadAheadSize string `json:"read_ahead_size,omitempty"` // Read ahead size (deprecated, use MaxChunkSize)
 
+	// Parallel range reads. On a high-latency path — notably streaming a debrid
+	// through an overseas proxy — a single connection is bounded by TCP
+	// window/RTT, so throughput scales with the number of concurrent range
+	// requests rather than with chunk size. ReadStreams > 1 splits each read across
+	// that many concurrent ranges, written back in order. ReadStreamChunk is only a
+	// floor on how small those ranges may get.
+	// Default 1 (disabled, single sequential request).
+	ReadStreams     int    `json:"read_streams,omitempty"`
+	ReadStreamChunk string `json:"read_stream_chunk,omitempty"` // MINIMUM per-stream range (default 2MB)
+	// SingleStreamCap: when the debrid reports a per-connection speed cap at least
+	// this high, a single connection already clears the target so parallel reads are
+	// skipped (saves CPU) even with ReadStreams > 1. Below it, ReadStreams is used.
+	// Empty => default 15MB; "0" disables the optimization (always ReadStreams).
+	SingleStreamCap string `json:"single_stream_cap,omitempty"`
+
 	// DropBehindMargin, e.g "256MB", makes the read path drop the page cache for
 	// streamed data more than this far behind the read head (bytes stay on disk).
 	// Empty/0 = disabled. Linux only; only useful under a tight memory cap.
@@ -140,6 +155,17 @@ func (c *Config) applyMountEnvVars() {
 	}
 	if val := getEnv("MOUNT__DFS__READ_AHEAD_SIZE"); val != "" {
 		c.Mount.DFS.ReadAheadSize = val
+	}
+	if val := getEnv("MOUNT__DFS__READ_STREAMS"); val != "" {
+		if v, err := strconv.Atoi(val); err == nil {
+			c.Mount.DFS.ReadStreams = v
+		}
+	}
+	if val := getEnv("MOUNT__DFS__READ_STREAM_CHUNK"); val != "" {
+		c.Mount.DFS.ReadStreamChunk = val
+	}
+	if val := getEnv("MOUNT__DFS__SINGLE_STREAM_CAP"); val != "" {
+		c.Mount.DFS.SingleStreamCap = val
 	}
 	if val := getEnv("MOUNT__DFS__CACHE_EXPIRY"); val != "" {
 		c.Mount.DFS.CacheExpiry = val

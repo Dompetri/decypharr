@@ -109,9 +109,9 @@ Array of Debrid services:
 
 | Field                             | Type   | Description                                                                    | Default                         |
 |-----------------------------------|--------|--------------------------------------------------------------------------------|---------------------------------|
-| `provider`                        | string | Provider type: `realdebrid`, `alldebrid`, `debridlink`, `torbox`, `premiumize` | **Required**                    |
+| `provider`                        | string | Provider type: `realdebrid`, `alldebrid`, `debridlink`, `torbox`, `premiumize`, `pikpak` | **Required**          |
 | `name`                            | string | Display name                                                                   | Provider type                   |
-| `api_key`                         | string | API key from provider dashboard                                                | **Required**                    |
+| `api_key`                         | string | API key from provider dashboard. For `pikpak`, use `username:password`         | **Required**                    |
 | `download_api_keys`               | array  | Additional keys for download rotation                                          | `[api_key]`                     |
 | `download_uncached`               | bool   | Download torrents not in provider cache                                        | `false`                         |
 | `rate_limit`                      | string | API rate limit (`200/minute`, `10/second`)                                     | `200/minute`                    |

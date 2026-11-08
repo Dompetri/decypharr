@@ -393,8 +393,9 @@ func (s *session) idleFired() {
 
 // httpTransport serves debrid links over HTTP with link refresh on failure.
 type httpTransport struct {
-	client  *http.Client
-	getLink func(ctx context.Context) (types.DownloadLink, error)
+	client    *http.Client
+	clientFor func(dl types.DownloadLink) *http.Client
+	getLink   func(ctx context.Context) (types.DownloadLink, error)
 	refresh func(ctx context.Context, bad types.DownloadLink) (types.DownloadLink, error)
 
 	// base/limit map file-relative session offsets onto the link target when
@@ -432,7 +433,11 @@ func (t *httpTransport) open(ctx context.Context, pos int64) (io.ReadCloser, err
 	}
 	req.Header.Set("Accept-Encoding", "identity")
 
-	resp, err := t.client.Do(req)
+	client := t.client
+	if t.clientFor != nil {
+		client = t.clientFor(dl)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, link.ClassifyTransportError(err)
 	}
@@ -694,6 +699,24 @@ func (m *Manager) OpenStreamForFile(ctx context.Context, info *FileInfo, offset 
 }
 
 func (m *Manager) openSession(ctx context.Context, entry *storage.Entry, filename string, offset int64, owner RewindOwner) (*session, string, string, error) {
+	if isEvicted(entry) {
+		wait := 20
+		if c := m.ProviderClient(entry.ActiveProvider); c != nil {
+			if w := c.Config().Eviction.RehydrateWaitSeconds; w > 0 {
+				wait = w
+			}
+		}
+		if err := m.rehydrateEvicted(ctx, entry, wait); err != nil {
+			return nil, "", "", customerror.NewError(
+				fmt.Errorf("file temporarily unavailable, re-hydrating: %w", err),
+				http.StatusServiceUnavailable, "rehydrating", false, false,
+			).Retryable()
+		}
+		if fresh, ferr := m.GetEntry(entry.InfoHash); ferr == nil && fresh != nil {
+			entry = fresh
+		}
+	}
+
 	file, ok := entry.Files[filename]
 	if !ok {
 		return nil, "", "", fmt.Errorf("file %s not found in entry %s", filename, entry.Name)
@@ -725,7 +748,10 @@ func (m *Manager) openSession(ctx context.Context, entry *storage.Entry, filenam
 		}
 	} else {
 		ht := &httpTransport{
-			client: m.streamClient,
+			client: m.streamClientFor(entry.ActiveProvider, false),
+			clientFor: func(dl types.DownloadLink) *http.Client {
+				return m.streamClientFor(entry.ActiveProvider, dl.StreamViaProxy)
+			},
 			getLink: func(ctx context.Context) (types.DownloadLink, error) {
 				return m.linkService.GetLink(ctx, entry, filename)
 			},

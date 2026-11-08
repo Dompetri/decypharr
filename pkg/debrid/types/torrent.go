@@ -153,6 +153,16 @@ type DownloadLink struct {
 	Size         int64     `json:"size"`
 	Id           string    `json:"id"`
 	ExpiresAt    time.Time
+	// SpeedCapBps is the per-connection speed ceiling (bytes/sec) the provider knows
+	// the link is subject to, or 0 when unknown. The mount uses it to skip parallel
+	// reads when a single connection already clears the target throughput.
+	SpeedCapBps int64 `json:"speed_cap_bps,omitempty"`
+	// StreamViaProxy requests that this link's bytes be fetched through the
+	// provider's proxy rather than direct. Set per-link by providers whose link
+	// variants need different egresses (e.g. PikPak: the region-bypassed WebDAV
+	// link streams direct, but a fallback web link must go via the proxy or it is
+	// region-throttled). Only meaningful when the provider has a proxy configured.
+	StreamViaProxy bool `json:"stream_via_proxy,omitempty"`
 }
 
 func (dl *DownloadLink) Valid() error {
