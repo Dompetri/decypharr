@@ -54,7 +54,7 @@
                 <li><a href="{{.URLBase}}browse" class="{{if eq .Page "browse"}}menu-active{{end}}">
                     <i class="bi bi-folder2-open text-primary"></i>Browse
                     </a></li>
-                <li><a href="{{.URLBase}}repair" class="{{if or (eq .Page "repair") (eq .Page "reacquire")}}menu-active{{end}}">
+                <li><a href="{{.URLBase}}repair" class="{{if or (eq .Page "repair") (eq .Page "reacquire") (eq .Page "history")}}menu-active{{end}}">
                     <i class="bi bi-wrench-adjustable text-accent"></i>Repair
                     </a></li>
                 <li><a href="{{.URLBase}}settings" class="{{if eq .Page "config"}}menu-active{{end}}">
@@ -88,7 +88,7 @@
                 <i class="bi bi-folder2-open"></i>
                 <span class="hidden xl:inline">Browse</span>
                 </a></li>
-            <li><a href="{{.URLBase}}repair" class="{{if or (eq .Page "repair") (eq .Page "reacquire")}}menu-active{{end}} tooltip tooltip-bottom"
+            <li><a href="{{.URLBase}}repair" class="{{if or (eq .Page "repair") (eq .Page "reacquire") (eq .Page "history")}}menu-active{{end}} tooltip tooltip-bottom"
                 data-tip="Repair Media">
                 <i class="bi bi-wrench-adjustable"></i>
                 <span class="hidden xl:inline">Repair</span>
@@ -143,6 +143,8 @@
     {{ template "repair" . }}
     {{ else if eq .Page "reacquire" }}
     {{ template "reacquire" . }}
+    {{ else if eq .Page "history" }}
+    {{ template "history" . }}
     {{ else if eq .Page "stats" }}
     {{ template "stats" . }}
     {{ else if eq .Page "config" }}
@@ -199,6 +201,8 @@
 <script src="{{.URLBase}}assets/js/repair.js"></script>
 {{ else if eq .Page "reacquire" }}
 <script src="{{.URLBase}}assets/js/reacquire.js"></script>
+{{ else if eq .Page "history" }}
+<script src="{{.URLBase}}assets/js/history.js"></script>
 {{ else if eq .Page "config" }}
 <script src="{{.URLBase}}assets/js/config.js"></script>
 {{ else if eq .Page "setup" }}

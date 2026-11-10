@@ -1,0 +1,189 @@
+{{ define "history" }}
+<div class="space-y-6">
+    {{ template "repair_tabs" . }}
+
+    {{ if .SetupError }}
+    <div role="alert" class="alert alert-warning">
+        <i class="bi bi-exclamation-triangle text-xl"></i>
+        <div>
+            <h3 class="font-bold">Configuration Required</h3>
+            <div class="text-sm">Your configuration is incomplete ({{ .SetupError }}). Please complete the setup in the
+                <a href="{{.URLBase}}settings" class="link link-hover font-semibold">Settings page</a>.
+            </div>
+        </div>
+    </div>
+    {{ end }}
+
+    <!-- Rebuild Runner Card -->
+    <div class="card bg-base-100 shadow-xl">
+        <div class="card-body">
+            <div class="flex flex-col lg:flex-row gap-4 lg:items-center lg:justify-between">
+                <div>
+                    <h2 class="card-title text-2xl">
+                        <i class="bi bi-clock-history mr-2 text-primary"></i>Rebuild from Arr History
+                    </h2>
+                    <p class="text-sm opacity-70 mt-1" id="historyStatusLine">
+                        Scan Arr libraries for lost folders and recover them as orphaned entries from grab history.
+                    </p>
+                    <p class="text-xs opacity-60 mt-1">
+                        Recovers missing local entries that Radarr/Sonarr still reference via symlinks (e.g. after a wiped database or debrid account migration).
+                        Entries are restored in an orphaned state without immediately contacting or downloading from the debrid provider.
+                    </p>
+                </div>
+                <div class="flex items-center gap-2">
+                    <button id="runRebuildBtn" class="btn btn-primary btn-sm w-full sm:w-auto">
+                        <i class="bi bi-play-fill mr-1"></i>Run Rebuild
+                    </button>
+                </div>
+            </div>
+
+            <!-- Parameters form -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mt-4 pt-4 border-t border-base-200">
+                <label class="form-control">
+                    <span class="label-text font-medium text-xs mb-1">Arr Instance</span>
+                    <select id="historyArrSelect" class="select select-bordered select-sm w-full">
+                        <option value="">All eligible Arrs (Radarr &amp; Sonarr)</option>
+                    </select>
+                </label>
+
+                <div class="form-control flex justify-end">
+                    <label class="label cursor-pointer py-1 justify-start gap-3 mt-auto">
+                        <input type="checkbox" id="historyDryRun" class="checkbox checkbox-primary checkbox-sm" checked>
+                        <div>
+                            <span class="label-text font-medium text-sm">Dry Run</span>
+                            <span class="text-xs opacity-60 block">Preview candidates without writing to database</span>
+                        </div>
+                    </label>
+                </div>
+
+                <div class="flex items-end">
+                    <div id="runProgressIndicator" class="hidden flex items-center gap-2 text-sm text-info py-2">
+                        <span class="loading loading-spinner loading-sm"></span>
+                        <span id="runProgressText">Scanning Arr history...</span>
+                    </div>
+                </div>
+            </div>
+
+            <div id="rebuildErrorAlert" class="alert alert-error py-2 text-sm hidden mt-3"></div>
+
+            <!-- Summary Stats -->
+            <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3 mt-4" id="historyCountsGrid">
+                <div class="bg-base-200/60 rounded-lg px-3 py-2">
+                    <div class="text-[10px] uppercase tracking-wide opacity-60">
+                        <i class="bi bi-files mr-1"></i>Arr Files
+                    </div>
+                    <div class="text-xl font-semibold mt-1" id="statArrFiles">-</div>
+                </div>
+                <div class="bg-base-200/60 rounded-lg px-3 py-2">
+                    <div class="text-[10px] uppercase tracking-wide opacity-60">
+                        <i class="bi bi-hdd mr-1"></i>Already Local
+                    </div>
+                    <div class="text-xl font-semibold text-success mt-1" id="statLocal">-</div>
+                </div>
+                <div class="bg-base-200/60 rounded-lg px-3 py-2">
+                    <div class="text-[10px] uppercase tracking-wide opacity-60">
+                        <i class="bi bi-question-circle mr-1"></i>Unresolved
+                    </div>
+                    <div class="text-xl font-semibold opacity-70 mt-1" id="statUnresolved">-</div>
+                </div>
+                <div class="bg-base-200/60 rounded-lg px-3 py-2">
+                    <div class="text-[10px] uppercase tracking-wide opacity-60">
+                        <i class="bi bi-search mr-1"></i>Candidates
+                    </div>
+                    <div class="text-xl font-semibold text-info mt-1" id="statScanned">-</div>
+                </div>
+                <div class="bg-base-200/60 rounded-lg px-3 py-2">
+                    <div class="text-[10px] uppercase tracking-wide opacity-60" id="statRebuiltLabel">
+                        <i class="bi bi-clock mr-1"></i>Would Rebuild
+                    </div>
+                    <div class="text-xl font-semibold text-primary mt-1" id="statRebuilt">-</div>
+                </div>
+                <div class="bg-base-200/60 rounded-lg px-3 py-2">
+                    <div class="text-[10px] uppercase tracking-wide opacity-60">
+                        <i class="bi bi-skip-forward mr-1"></i>Skipped
+                    </div>
+                    <div class="text-xl font-semibold text-warning mt-1" id="statSkipped">-</div>
+                </div>
+                <div class="bg-base-200/60 rounded-lg px-3 py-2">
+                    <div class="text-[10px] uppercase tracking-wide opacity-60">
+                        <i class="bi bi-x-circle mr-1"></i>Failed
+                    </div>
+                    <div class="text-xl font-semibold text-error mt-1" id="statFailed">-</div>
+                </div>
+            </div>
+
+            <!-- Skip details banner -->
+            <div id="skipBreakdownPanel" class="hidden mt-3 text-xs bg-base-200/50 rounded-lg p-3 text-base-content/70 flex flex-wrap gap-x-4 gap-y-1">
+                <span class="font-semibold text-base-content/90">Skip breakdown:</span>
+                <span id="skipNoHistory">No grab history: 0</span>
+                <span>·</span>
+                <span id="skipNotTorrent">Non-torrent grab: 0</span>
+                <span>·</span>
+                <span id="skipAlreadyHave">Infohash already present: 0</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Results Table Card -->
+    <div class="card bg-base-100 shadow-xl">
+        <div class="card-body">
+            <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+                <h3 class="card-title text-lg">
+                    <i class="bi bi-list-check mr-2 text-accent"></i>Results
+                    <span id="resultsCountBadge" class="badge badge-ghost badge-sm">0 items</span>
+                </h3>
+
+                <div class="flex flex-wrap gap-2 w-full sm:w-auto items-center">
+                    <div class="w-full sm:w-44">
+                        <label class="sr-only" for="resultsStatusFilter">Filter by status</label>
+                        <select id="resultsStatusFilter" class="select select-bordered select-sm w-full">
+                            <option value="">All statuses</option>
+                            <option value="rebuilt">Rebuilt / Would rebuild</option>
+                            <option value="skipped">Skipped</option>
+                            <option value="failed">Failed</option>
+                        </select>
+                    </div>
+
+                    <div class="w-full sm:w-60">
+                        <input id="resultsSearchInput" type="search" class="input input-bordered input-sm w-full"
+                               placeholder="Search folder or infohash..." autocomplete="off">
+                    </div>
+                </div>
+            </div>
+
+            <div class="overflow-x-auto mt-3">
+                <table class="table table-hover table-sm">
+                    <caption class="sr-only">Rebuild candidates and results</caption>
+                    <thead class="bg-base-200">
+                    <tr>
+                        <th class="w-36">Status</th>
+                        <th class="w-24">Arr</th>
+                        <th>Folder Name</th>
+                        <th class="w-48">InfoHash</th>
+                        <th>Notes / Error</th>
+                    </tr>
+                    </thead>
+                    <tbody id="resultsTableBody">
+                    <tr>
+                        <td colspan="5" class="text-center py-8 opacity-60">
+                            No rebuild has been run yet. Configure the options above and click "Run Rebuild".
+                        </td>
+                    </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="mt-2 flex flex-col items-center justify-between gap-3 border-t border-base-200 pt-4 sm:flex-row">
+                <span id="resultsPaginationInfo" class="text-sm opacity-70">Showing 0 of 0</span>
+                <div id="resultsPaginationControls" class="join max-w-full overflow-x-auto"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+        window.historyRebuildManager = new HistoryRebuildManager();
+    });
+</script>
+{{ end }}

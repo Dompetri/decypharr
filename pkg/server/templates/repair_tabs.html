@@ -8,5 +8,9 @@
        class="tab {{if eq .Page "reacquire"}}tab-active{{end}}">
         <i class="bi bi-arrow-repeat mr-2"></i>Arr Reacquisition
     </a>
+    <a role="tab" href="{{.URLBase}}repair/history"
+       class="tab {{if eq .Page "history"}}tab-active{{end}}">
+        <i class="bi bi-clock-history mr-2"></i>History Rebuild
+    </a>
 </div>
 {{ end }}

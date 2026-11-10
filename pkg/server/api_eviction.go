@@ -108,6 +108,22 @@ func (s *Server) handleIngestStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRebuildFromHistory(w http.ResponseWriter, r *http.Request) {
 	arrName := r.URL.Query().Get("arr")
 	dryRun := isTruthy(r.URL.Query().Get("dry_run"))
+
+	if strings.Contains(r.Header.Get("Content-Type"), "application/json") && r.Body != nil {
+		var req struct {
+			Arr    string `json:"arr"`
+			DryRun *bool  `json:"dry_run"`
+		}
+		if err := json.ConfigDefault.NewDecoder(r.Body).Decode(&req); err == nil {
+			if req.Arr != "" {
+				arrName = req.Arr
+			}
+			if req.DryRun != nil {
+				dryRun = *req.DryRun
+			}
+		}
+	}
+
 	report, err := s.manager.RebuildFromArrHistory(r.Context(), arrName, dryRun)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)

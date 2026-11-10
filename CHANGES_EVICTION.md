@@ -256,7 +256,12 @@ flowchart TD
 | | `pkg/mount/dfs/vfs/file.go` | Modified | Stream caller attribution support. |
 | | `pkg/mount/dfs/backend/hanwen/caller*.go` | Added | PID inspection and caller classification heuristics (probe, trickplay, transcode, ffmpeg). |
 | **API & Server** | `pkg/server/api_eviction.go` | Added | HTTP handlers for quota status, manual eviction, ingestion queue, and history rebuild. |
-| | `pkg/server/routes.go` | Modified | Registered eviction and rebuild endpoints in WebRoutes router. |
+| | `pkg/server/routes.go` | Modified | Registered eviction, rebuild endpoints, and `/repair/history` page route. |
+| | `pkg/server/ui.go` & `pkg/server/server.go` | Modified | Added `HistoryHandler` and template registration for `/repair/history`. |
+| | `pkg/server/templates/history.html` | Added | Dedicated UI view for running rebuild from Arr history with live metrics and filtered results. |
+| | `pkg/server/templates/repair_tabs.html` & `layout.html` | Modified | Added History Rebuild tab and navigation highlights under Repair section. |
+| | `pkg/server/assets/js/history.js` | Added | `HistoryRebuildManager` handling execution, filtering, pagination, and toast feedback. |
+| **CI / CD** | `.github/workflows/docker.yml` | Added | Multi-arch Docker image build & push pipeline (`linux/amd64`, `linux/arm64`) for GHCR and Docker Hub. |
 | | `pkg/server/setup.go` | Modified | PikPak provider initialization in server setup. |
 | | `pkg/server/assets/js/config.js` | Modified | PikPak provider support in UI dashboard settings. |
 | | `pkg/server/templates/setup.html` | Modified | PikPak credentials input in web setup wizard. |

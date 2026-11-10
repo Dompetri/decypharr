@@ -30,7 +30,7 @@ const minifyOptions = {
         reserved: [
             '$', 'jQuery', 'decypharrUtils', 'configManager', 'repairManager',
             'RepairManager', 'RepairUtils', 'ConfigManager', 'window', 'document',
-            'reacquireManager', 'ReacquireManager'
+            'reacquireManager', 'ReacquireManager', 'historyRebuildManager', 'HistoryRebuildManager'
         ]
     },
     format: {
