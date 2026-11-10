@@ -47,6 +47,11 @@ func (c *Config) ValidateFileAllowed(filename string, filesize int64) error {
 	return nil
 }
 
+// IsFileAllowed is an alias for ValidateFileAllowed for backward compatibility.
+func (c *Config) IsFileAllowed(filename string, filesize int64) error {
+	return c.ValidateFileAllowed(filename, filesize)
+}
+
 func (c *Config) isSizeAllowed(size int64) bool {
 	if size == 0 {
 		return true // Maybe the debrid hasn't reported the size yet

@@ -294,7 +294,7 @@ func (p *Pikpak) collectFilesInto(ctx context.Context, parentID, prefix, torrent
 				}
 				continue
 			}
-			if err := cfg.IsFileAllowed(relPath, child.Size); err != nil {
+			if err := cfg.ValidateFileAllowed(relPath, child.Size); err != nil {
 				continue
 			}
 			// Collapse "(N)" re-add copies to one clean entry; keep the newest. Distinct
@@ -406,7 +406,7 @@ func (p *Pikpak) refresh(ctx context.Context, t *types.Torrent) error {
 			return err
 		}
 	} else {
-		if cfg.IsFileAllowed(file.Name, file.Size) == nil {
+		if cfg.ValidateFileAllowed(file.Name, file.Size) == nil {
 			// Strip any "(N)" re-add suffix so the entry name is stable across re-adds
 			// (PikPak hands a different copy each time); the Link still points at this
 			// specific physical file.
