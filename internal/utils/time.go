@@ -69,3 +69,8 @@ func ParseDuration(s string) (time.Duration, error) {
 
 	return total, nil
 }
+
+// NowUnix returns the current Unix timestamp in seconds.
+func NowUnix() int64 {
+	return time.Now().Unix()
+}

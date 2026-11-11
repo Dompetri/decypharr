@@ -235,7 +235,7 @@ func (m *Manager) runArchive(ctx context.Context, cfg config.Debrid, client debr
 	// watch / resume them without the sweep yanking them back mid-session).
 	var hotCutoff int64
 	if hw, err := utils.ParseDuration(cfg.Eviction.HotWindow); err == nil && hw > 0 {
-		hotCutoff = utils.NowUnix() - int64(hw.Seconds())
+		hotCutoff = time.Now().Unix() - int64(hw.Seconds())
 	}
 
 	var victims []string
