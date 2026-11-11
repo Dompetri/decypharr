@@ -348,7 +348,7 @@ func (m *Manager) archiveDownloadURL(entry *storage.Entry, filename string) (lin
 	if client == nil {
 		return "", false, fmt.Errorf("provider %q not available", entry.ActiveProvider)
 	}
-	dl, err := client.GetDownloadLink(pe.ID, &debridTypes.File{
+	dl, err := client.GetDownloadLink(ctx, pe.ID, &debridTypes.File{
 		TorrentId: pe.ID,
 		Id:        pf.Id,
 		Link:      pf.Link,
@@ -503,7 +503,7 @@ func (m *Manager) rehydrateEvicted(ctx context.Context, entry *storage.Entry, wa
 		}
 		entry.Bad = false
 		entry.UpdatedAt = time.Now()
-		_ = m.AddOrUpdate(entry, func(t *storage.Entry) { m.RefreshEntries(true) })
+		_ = m.AddOrUpdate(entry, func(t *storage.Entry) { m.InvalidateEntryCache() })
 		m.clearProbeCache(infohash) // file is back on the provider; slices no longer needed
 		m.logger.Info().Str("name", entry.Name).Str("infohash", infohash).Msg("eviction: re-hydrated evicted torrent")
 	}()

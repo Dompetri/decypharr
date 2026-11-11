@@ -95,7 +95,7 @@ type Manager struct {
 	// In-flight lazy re-hydrations of evicted entries, keyed by InfoHash, so
 	// simultaneous reads of the same evicted file trigger a single re-add.
 	rehydrateMu sync.Mutex
-	rehydrating map[string]*rehydrateCall
+	rehydrating *xsync.Map[string, *rehydrateCall]
 
 	// Rate-limits distinct re-add attempts so a burst of reads touching many
 	// evicted/orphaned files at once (e.g. a library scan) doesn't stampede the
@@ -109,7 +109,8 @@ type Manager struct {
 	// Archive ingestion: queue lock + recently-submitted infohashes (suppresses
 	// re-submitting before the provider creates the entry).
 	ingestMu        sync.Mutex
-	ingestSubmitted map[string]int64 // infohash -> submit unix timestamp
+	ingestSubmitted *xsync.Map[string, int64] // infohash -> submit unix timestamp
+	lastStreamed    *xsync.Map[string, int64] // infohash -> last streamed unix timestamp
 
 	arrRecoveryMu          sync.RWMutex
 	arrRecovery            ArrRecovery
@@ -222,9 +223,10 @@ func New() *Manager {
 		ready:                  make(chan struct{}),
 		streamClient:           streamClient,
 		providerStreamClients:  xsync.NewMap[string, *http.Client](),
-		rehydrating:            make(map[string]*rehydrateCall),
+		rehydrating:            xsync.NewMap[string, *rehydrateCall](),
 		rehydrateThrottle:      newRehydrateThrottle(rehydrateBurstWindow, rehydrateBurstLimit),
-		ingestSubmitted:        make(map[string]int64),
+		ingestSubmitted:        xsync.NewMap[string, int64](),
+		lastStreamed:           xsync.NewMap[string, int64](),
 		usenetTimeout:          usenetTimeout,
 		debridSpeedTestResults: xsync.NewMap[string, debridTypes.SpeedTestResult](),
 		activeStreams:          xsync.NewMap[string, *ActiveStream](),

@@ -227,7 +227,7 @@ func (m *Manager) rebuildOne(ctx context.Context, a arr.Arr, provider, folder st
 		res.Error = "no files resolved from arr symlinks"
 		return res
 	}
-	if err := m.AddOrUpdate(entry, func(t *storage.Entry) { m.RefreshEntries(true) }); err != nil {
+	if err := m.AddOrUpdate(entry, func(t *storage.Entry) { m.InvalidateEntryCache() }); err != nil {
 		res.Status = "failed"
 		res.Error = err.Error()
 		m.logger.Warn().Err(err).Str("arr", a.Name).Str("folder", folder).Str("infohash", infohash).Msg("rebuild: failed to persist rebuilt entry")
