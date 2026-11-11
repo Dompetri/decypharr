@@ -60,7 +60,7 @@ func (m *Manager) cacheEntryProbeSlices(ctx context.Context, entry *storage.Entr
 				case <-time.After(3 * time.Second):
 				}
 			}
-			url, viaProxy, err := m.archiveDownloadURL(entry, name)
+			url, viaProxy, err := m.archiveDownloadURL(ctx, entry, name)
 			if err != nil {
 				lastErr = fmt.Errorf("get link for %s: %w", name, err)
 				continue
@@ -106,6 +106,20 @@ func (m *Manager) writeProbeCache(ctx context.Context, provider, infohash, filen
 		}
 	}
 	return nil
+}
+
+func (m *Manager) doRequest(ctx context.Context, provider, link string, start, end int64, viaProxy bool) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, link, nil)
+	if err != nil {
+		return nil, err
+	}
+	if start >= 0 && end >= start {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+	}
+	req.Header.Set("Connection", "keep-alive")
+	req.Header.Set("Accept-Encoding", "identity")
+	client := m.streamClientFor(provider, viaProxy)
+	return client.Do(req)
 }
 
 func (m *Manager) fetchRangeToFile(ctx context.Context, provider, link string, viaProxy bool, start, end int64, path string) error {
@@ -192,6 +206,20 @@ func (m *Manager) serveProbeFromCache(infohash, filename string, size, start, en
 		// Body read (real playback) — let the caller re-hydrate.
 		return false, nil
 	}
+}
+
+// StreamMetadata describes the headers/status for a streaming response before data flows.
+type StreamMetadata struct {
+	Header        http.Header
+	StatusCode    int
+	ContentLength int64
+}
+
+// StreamReadyFunc allows callers to copy headers/status before streaming begins.
+type StreamReadyFunc func(*StreamMetadata) error
+
+func buildContentRange(start, end, total int64) string {
+	return fmt.Sprintf("bytes %d-%d/%d", start, end, total)
 }
 
 func (m *Manager) serveCacheSlice(path string, fileOffset, start, end, size int64, writer io.Writer, onReady StreamReadyFunc) error {

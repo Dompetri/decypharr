@@ -3,6 +3,7 @@ package manager
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -349,4 +350,35 @@ func looksLikeInfohash(s string) bool {
 		}
 	}
 	return true
+}
+
+// collectArrFiles groups an arr content item's files by their symlink target's entry folder.
+func collectArrFiles(media arr.Content) map[string][]arr.ContentFile {
+	grouped := make(map[string][]arr.ContentFile)
+	for _, file := range media.Files {
+		if target := readSymlinkTarget(file.Path); target != "" {
+			file.IsSymlink = true
+			dir, name := filepath.Split(target)
+			file.TargetPath = name
+			entryPath := filepath.Clean(dir)
+			grouped[entryPath] = append(grouped[entryPath], file)
+		}
+	}
+	return grouped
+}
+
+func readSymlinkTarget(path string) string {
+	path = filepath.Clean(path)
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		return ""
+	}
+	target, err := os.Readlink(path)
+	if err != nil {
+		return ""
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(filepath.Dir(path), target)
+	}
+	return target
 }

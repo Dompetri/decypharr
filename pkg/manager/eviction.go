@@ -332,7 +332,7 @@ func (m *Manager) QuotaStatus(ctx context.Context, debridName string) (used, lim
 // archiveDownloadURL resolves a placement file's download URL. The returned
 // viaProxy reports whether the link must be fetched through the provider proxy
 // (see types.DownloadLink.StreamViaProxy).
-func (m *Manager) archiveDownloadURL(entry *storage.Entry, filename string) (link string, viaProxy bool, err error) {
+func (m *Manager) archiveDownloadURL(ctx context.Context, entry *storage.Entry, filename string) (link string, viaProxy bool, err error) {
 	if entry == nil {
 		return "", false, fmt.Errorf("nil entry")
 	}
