@@ -141,29 +141,34 @@ func (p *Pikpak) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
 	if err != nil {
 		return nil, err
 	}
-	if resp.Task == nil || resp.Task.ID == "" {
-		return nil, fmt.Errorf("pikpak: offline download returned no task")
-	}
+	var fileID string
+	var fileName string
+	if resp.Task != nil && resp.Task.ID != "" {
+		task := resp.Task
+		fileName = task.FileName
 
-	task := resp.Task
-	fileName := task.FileName
-
-	// At creation the task is in the "Collecting" phase with an empty file_id;
-	// PikPak assigns the destination drive entry once it has resolved the magnet
-	// metadata. Wait briefly for that id since it's the durable torrent handle.
-	fileID := task.FileID
-	if fileID == "" {
-		resolved, name, err := p.waitForFileID(ctx, task.ID)
-		if err != nil {
-			return nil, err
+		// At creation the task is in the "Collecting" phase with an empty file_id;
+		// PikPak assigns the destination drive entry once it has resolved the magnet
+		// metadata. Wait briefly for that id since it's the durable torrent handle.
+		fileID = task.FileID
+		if fileID == "" {
+			resolved, name, err := p.waitForFileID(ctx, task.ID)
+			if err != nil {
+				return nil, err
+			}
+			fileID = resolved
+			if name != "" {
+				fileName = name
+			}
 		}
-		fileID = resolved
-		if name != "" {
-			fileName = name
+		if fileID == "" {
+			return nil, fmt.Errorf("pikpak: offline download is still collecting metadata (task %s); try again shortly", task.ID)
 		}
-	}
-	if fileID == "" {
-		return nil, fmt.Errorf("pikpak: offline download is still collecting metadata (task %s); try again shortly", task.ID)
+	} else if resp.File != nil && resp.File.ID != "" {
+		fileID = resp.File.ID
+		fileName = resp.File.Name
+	} else {
+		return nil, fmt.Errorf("pikpak: offline download returned no task or file")
 	}
 
 	torrent.Id = fileID

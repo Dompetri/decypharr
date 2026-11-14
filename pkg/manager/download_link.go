@@ -22,6 +22,9 @@ func (m *Manager) GetDownloadLink(ctx context.Context, entry *storage.Entry, fil
 	if fresh != nil && fresh != entry {
 		*entry = *fresh
 	}
+	if m.linkService == nil {
+		return types.DownloadLink{}, fmt.Errorf("link service is nil")
+	}
 	return m.linkService.GetLink(ctx, entry, filename)
 }
 

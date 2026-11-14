@@ -43,6 +43,11 @@ type davCreds struct {
 	password string
 }
 
+type captchaItem struct {
+	token  string
+	expiry time.Time
+}
+
 // folderInfo caches a folder's name and parent for WebDAV path building.
 type folderInfo struct {
 	name     string
@@ -114,10 +119,9 @@ type apiClient struct {
 	tokenExpiry  time.Time
 
 	// captcha is a reusable captcha token attached to every authenticated request
-	// (PikPak rejects calls without one). It is refreshed on expiry or rejection.
+	// (PikPak rejects calls without one). Tokens are cached per action.
 	captchaMu     sync.Mutex
-	captchaToken  string
-	captchaExpiry time.Time
+	captchaTokens map[string]captchaItem
 
 	// userID is read while building request headers during login (under mu), so
 	// it is stored atomically to stay lock-free and avoid a re-entrant deadlock.
@@ -150,11 +154,12 @@ func newAPIClient(httpClient *request.Client, logger zerolog.Logger, username, p
 	// verification on every restart.
 	deviceID := md5Hex(username + password)
 	return &apiClient{
-		http:     httpClient,
-		logger:   logger,
-		deviceID: deviceID,
-		username: username,
-		password: password,
+		http:          httpClient,
+		logger:        logger,
+		deviceID:      deviceID,
+		username:      username,
+		password:      password,
+		captchaTokens: make(map[string]captchaItem),
 		davClient: &http.Client{
 			Timeout: 30 * time.Second,
 			// Don't follow the redirect; we want to capture the high-speed
@@ -267,16 +272,21 @@ func (c *apiClient) rawCall(ctx context.Context, method, rawurl string, params u
 		return err
 	}
 
-	if len(data) > 0 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var ae apiError
-		if json.Unmarshal(data, &ae) == nil && ae.ErrorField != "" {
+		if len(data) > 0 && json.Unmarshal(data, &ae) == nil && (ae.ErrorField != "" || ae.Code != 0 || ae.Description != "" || ae.Message != "") {
 			ae.status = resp.StatusCode
 			return &ae
 		}
+		return &apiError{status: resp.StatusCode, ErrorField: fmt.Sprintf("http %d", resp.StatusCode), Description: string(data)}
 	}
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &apiError{status: resp.StatusCode, ErrorField: fmt.Sprintf("http %d", resp.StatusCode), Description: string(data)}
+	if len(data) > 0 {
+		var ae apiError
+		if json.Unmarshal(data, &ae) == nil && (ae.ErrorField != "" || (ae.Code != 0 && (ae.Description != "" || ae.Message != ""))) {
+			ae.status = resp.StatusCode
+			return &ae
+		}
 	}
 
 	if out != nil && len(data) > 0 {
@@ -316,33 +326,51 @@ func (c *apiClient) requestCaptcha(ctx context.Context, action string, meta map[
 	return resp.CaptchaToken, resp.ExpiresIn, nil
 }
 
-// ensureCaptcha returns a valid cached captcha token, refreshing it when missing
-// or near expiry. PikPak reuses one token across all endpoints.
-func (c *apiClient) ensureCaptcha(ctx context.Context) (string, error) {
+func actionFor(method, rawurl string) string {
+	if method == http.MethodGet || method == http.MethodHead {
+		return "GET:/drive/v1/about"
+	}
+	u, err := url.Parse(rawurl)
+	if err != nil {
+		return method + ":" + rawurl
+	}
+	return method + ":" + u.Path
+}
+
+// ensureCaptcha returns a valid cached captcha token for the requested action,
+// refreshing it when missing or near expiry.
+func (c *apiClient) ensureCaptcha(ctx context.Context, action string) (string, error) {
 	c.captchaMu.Lock()
 	defer c.captchaMu.Unlock()
 
-	if c.captchaToken != "" && time.Now().Before(c.captchaExpiry.Add(-30*time.Second)) {
-		return c.captchaToken, nil
+	if item, ok := c.captchaTokens[action]; ok && item.token != "" && time.Now().Before(item.expiry.Add(-30*time.Second)) {
+		return item.token, nil
 	}
 
-	tok, expiresIn, err := c.requestCaptcha(ctx, "GET:/drive/v1/about", nil)
+	tok, expiresIn, err := c.requestCaptcha(ctx, action, nil)
 	if err != nil {
 		return "", err
 	}
 	if expiresIn <= 0 {
 		expiresIn = 300
 	}
-	c.captchaToken = tok
-	c.captchaExpiry = time.Now().Add(time.Duration(expiresIn) * time.Second)
+	c.captchaTokens[action] = captchaItem{
+		token:  tok,
+		expiry: time.Now().Add(time.Duration(expiresIn) * time.Second),
+	}
 	return tok, nil
 }
 
-// invalidateCaptcha clears the cached captcha token so the next call refreshes it.
-func (c *apiClient) invalidateCaptcha() {
+// invalidateCaptcha clears cached captcha token(s) so the next call refreshes it.
+// When action is empty all cached tokens are cleared.
+func (c *apiClient) invalidateCaptcha(action string) {
 	c.captchaMu.Lock()
-	c.captchaToken = ""
-	c.captchaMu.Unlock()
+	defer c.captchaMu.Unlock()
+	if action == "" {
+		c.captchaTokens = make(map[string]captchaItem)
+	} else {
+		delete(c.captchaTokens, action)
+	}
 }
 
 // loginLocked performs a username/password sign-in. Caller must hold c.mu.
@@ -467,7 +495,9 @@ func (c *apiClient) authCall(ctx context.Context, method, rawurl string, params 
 	if err != nil {
 		return err
 	}
-	captcha, err := c.ensureCaptcha(ctx)
+
+	action := actionFor(method, rawurl)
+	captcha, err := c.ensureCaptcha(ctx, action)
 	if err != nil {
 		return err
 	}
@@ -479,13 +509,18 @@ func (c *apiClient) authCall(ctx context.Context, method, rawurl string, params 
 		return c.rawCall(ctx, method, rawurl, params, body, headers, out)
 	}
 
+	var lastErr error
 	// Up to two corrective retries: one for an expired token, one for a stale captcha.
 	for attempt := 0; attempt < 3; attempt++ {
-		err = doRequest(token, captcha)
+		err := doRequest(token, captcha)
+		if err == nil {
+			return nil
+		}
 		ae, ok := err.(*apiError)
 		if !ok {
 			return err
 		}
+		lastErr = ae
 		switch {
 		case ae.authExpired():
 			token, err = c.forceRefresh(ctx)
@@ -493,8 +528,8 @@ func (c *apiClient) authCall(ctx context.Context, method, rawurl string, params 
 				return err
 			}
 		case ae.captchaInvalid():
-			c.invalidateCaptcha()
-			captcha, err = c.ensureCaptcha(ctx)
+			c.invalidateCaptcha(action)
+			captcha, err = c.ensureCaptcha(ctx, action)
 			if err != nil {
 				return err
 			}
@@ -502,7 +537,10 @@ func (c *apiClient) authCall(ctx context.Context, method, rawurl string, params 
 			return ae
 		}
 	}
-	return err
+	if lastErr != nil {
+		return lastErr
+	}
+	return fmt.Errorf("pikpak: request failed after retries")
 }
 
 // ---------------------------------------------------------------------------

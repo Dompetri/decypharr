@@ -21,14 +21,19 @@ type apiError struct {
 	ErrorField  string `json:"error"`
 	Code        int    `json:"error_code"`
 	Description string `json:"error_description"`
+	Message     string `json:"message,omitempty"`
 	status      int
 }
 
 func (e *apiError) Error() string {
-	if e.Description != "" {
-		return fmt.Sprintf("pikpak: %s (code %d, status %d)", e.Description, e.Code, e.status)
+	msg := e.Description
+	if msg == "" {
+		msg = e.Message
 	}
-	return fmt.Sprintf("pikpak: %s (code %d, status %d)", e.ErrorField, e.Code, e.status)
+	if msg == "" {
+		msg = e.ErrorField
+	}
+	return fmt.Sprintf("pikpak: %s (code %d, status %d)", msg, e.Code, e.status)
 }
 
 // authExpired reports whether the error means the access token is no longer valid.

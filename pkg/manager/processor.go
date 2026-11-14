@@ -661,6 +661,9 @@ func (m *Manager) hasUsableLink(entry *storage.Entry) bool {
 	if name == "" {
 		return false
 	}
+	if m.linkService == nil {
+		return true
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	dl, err := m.linkService.GetLink(ctx, entry, name)

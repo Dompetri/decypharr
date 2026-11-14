@@ -80,6 +80,9 @@ func New(
 // GetLink fetches and validates a download link for a file in an entry.
 // Links are cached at the account level; this service only tracks validation state.
 func (s *Service) GetLink(ctx context.Context, entry *storage.Entry, filename string) (types.DownloadLink, error) {
+	if s == nil {
+		return emptyDownloadLink, fmt.Errorf("link service is nil")
+	}
 	// Caller already gone? Don't even start.
 	if err := ctx.Err(); err != nil {
 		return emptyDownloadLink, err
