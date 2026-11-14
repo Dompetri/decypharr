@@ -813,6 +813,14 @@ func (c *apiClient) addOfflineDownloadMCP(ctx context.Context, fileURL string) (
 		return nil, fmt.Errorf("pikpak: mcp error (%d): %s", rpcResp.Error.Code, rpcResp.Error.Message)
 	}
 
+	if rpcResp.Result.IsError {
+		msg := "unknown error"
+		if len(rpcResp.Result.Content) > 0 {
+			msg = rpcResp.Result.Content[0].Text
+		}
+		return nil, fmt.Errorf("pikpak: mcp add_link failed: %s", msg)
+	}
+
 	if len(rpcResp.Result.Content) == 0 {
 		return nil, fmt.Errorf("pikpak: mcp returned empty content")
 	}
