@@ -3,10 +3,13 @@ package pikpak
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/request"
 )
 
 func TestActionFor(t *testing.T) {
@@ -182,5 +185,99 @@ func TestLoginBackoffOnFailure(t *testing.T) {
 	_, err := c.ensureLogin(ctx)
 	if err != rateLimitedErr {
 		t.Fatalf("expected cached rateLimitedErr, got %v", err)
+	}
+}
+
+func TestAddOfflineDownloadMCP(t *testing.T) {
+	var initCalled bool
+	var callReceived bool
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-mcp-token" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		var req struct {
+			Method string `json:"method"`
+			Params struct {
+				Name      string         `json:"name"`
+				Arguments map[string]any `json:"arguments"`
+			} `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		switch req.Method {
+		case "initialize":
+			initCalled = true
+			w.Header().Set("mcp-session-id", "sess-xyz-987")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      1,
+				"result":  map[string]any{"serverInfo": map[string]string{"name": "mock"}},
+			})
+		case "tools/call":
+			callReceived = true
+			if r.Header.Get("mcp-session-id") != "sess-xyz-987" {
+				http.Error(w, "missing or wrong session id", http.StatusBadRequest)
+				return
+			}
+			if req.Params.Name != "add_link" {
+				http.Error(w, "unexpected tool name: "+req.Params.Name, http.StatusBadRequest)
+				return
+			}
+			if req.Params.Arguments["url"] != "magnet:?xt=urn:btih:12345" {
+				http.Error(w, "unexpected url argument", http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      2,
+				"result": map[string]any{
+					"content": []map[string]any{
+						{
+							"type": "text",
+							"text": `{"task_id":"task-mcp-456","file_name":"TestMovie.2024.mkv"}`,
+						},
+					},
+				},
+			})
+		default:
+			http.Error(w, "unknown method", http.StatusBadRequest)
+		}
+	}))
+	defer ts.Close()
+
+	oldHost := mcpHost
+	mcpHost = ts.URL
+	defer func() { mcpHost = oldHost }()
+
+	httpClient := request.New()
+	client := newAPIClient(httpClient, zerolog.Nop(), "", "", "test-mcp-token")
+
+	resp, err := client.addOfflineDownload(t.Context(), "magnet:?xt=urn:btih:12345", "TestMovie.2024.mkv")
+	if err != nil {
+		t.Fatalf("unexpected error adding offline download via MCP: %v", err)
+	}
+
+	if !initCalled {
+		t.Errorf("expected MCP initialize to be called")
+	}
+	if !callReceived {
+		t.Errorf("expected MCP tools/call to be called")
+	}
+	if resp.Task == nil {
+		t.Fatalf("expected non-nil task in response")
+	}
+	if resp.Task.ID != "task-mcp-456" {
+		t.Errorf("expected Task.ID = 'task-mcp-456', got %q", resp.Task.ID)
+	}
+	if resp.Task.FileName != "TestMovie.2024.mkv" {
+		t.Errorf("expected Task.FileName = 'TestMovie.2024.mkv', got %q", resp.Task.FileName)
 	}
 }

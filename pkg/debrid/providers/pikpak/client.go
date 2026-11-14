@@ -39,6 +39,8 @@ const (
 	davServeHost = "https://dav.mypikpak.com"     // WebDAV file-serving host
 )
 
+var mcpHost = "https://pikpak.ai/mcp"
+
 // davCreds holds Basic-auth credentials for the WebDAV serving host.
 type davCreds struct {
 	username string
@@ -142,6 +144,10 @@ type apiClient struct {
 	davFetched  bool
 	folderMu    sync.Mutex
 	folderCache map[string]folderInfo
+
+	// MCP session state for captcha-free link submission via pikpak.ai/mcp.
+	mcpMu        sync.Mutex
+	mcpSessionID string
 }
 
 func (c *apiClient) getUserID() string {
@@ -658,9 +664,195 @@ func (c *apiClient) authCall(ctx context.Context, method, rawurl string, params 
 // High level operations
 // ---------------------------------------------------------------------------
 
+// ensureMCPSession performs the MCP protocol initialization handshake against
+// pikpak.ai/mcp if not already initialized, returning the active session ID.
+func (c *apiClient) ensureMCPSession(ctx context.Context, token string) (string, error) {
+	c.mcpMu.Lock()
+	defer c.mcpMu.Unlock()
+	if c.mcpSessionID != "" {
+		return c.mcpSessionID, nil
+	}
+
+	initBody := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "initialize",
+		"params": map[string]any{
+			"protocolVersion": "2024-11-05",
+			"capabilities":    map[string]any{},
+			"clientInfo": map[string]string{
+				"name":    "decypharr",
+				"version": "1.0",
+			},
+		},
+	}
+
+	data, err := json.Marshal(initBody)
+	if err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, mcpHost, bytes.NewReader(data))
+	if err != nil {
+		return "", err
+	}
+	for k, v := range c.baseHeaders() {
+		req.Header.Set(k, v)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("pikpak: mcp init failed (HTTP %d): %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	sessID := resp.Header.Get("mcp-session-id")
+	if sessID == "" {
+		sessID = "default"
+	}
+	c.mcpSessionID = sessID
+	return sessID, nil
+}
+
+type mcpAddLinkResult struct {
+	TaskID   string `json:"task_id"`
+	FileName string `json:"file_name"`
+}
+
+// addOfflineDownloadMCP submits a magnet/URL to PikPak's official Model Context Protocol (MCP)
+// server at pikpak.ai/mcp. This bypasses the 10 TB third-party REST API quota and captcha requirements.
+func (c *apiClient) addOfflineDownloadMCP(ctx context.Context, fileURL string) (*newTaskResponse, error) {
+	token, err := c.ensureLogin(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	sessID, err := c.ensureMCPSession(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+
+	callBody := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "add_link",
+			"arguments": map[string]any{
+				"url": fileURL,
+			},
+		},
+	}
+
+	data, err := json.Marshal(callBody)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, mcpHost, bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range c.baseHeaders() {
+		req.Header.Set(k, v)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	if sessID != "" && sessID != "default" {
+		req.Header.Set("mcp-session-id", sessID)
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		c.mcpMu.Lock()
+		c.mcpSessionID = ""
+		c.mcpMu.Unlock()
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		c.mcpMu.Lock()
+		c.mcpSessionID = ""
+		c.mcpMu.Unlock()
+		return nil, fmt.Errorf("pikpak: mcp add_link failed (HTTP %d): %s", resp.StatusCode, string(respBytes))
+	}
+
+	var rpcResp struct {
+		Result struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+			IsError bool `json:"isError"`
+		} `json:"result"`
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+
+	if err := json.Unmarshal(respBytes, &rpcResp); err != nil {
+		return nil, fmt.Errorf("pikpak: failed to parse mcp response: %w", err)
+	}
+
+	if rpcResp.Error != nil {
+		c.mcpMu.Lock()
+		c.mcpSessionID = ""
+		c.mcpMu.Unlock()
+		return nil, fmt.Errorf("pikpak: mcp error (%d): %s", rpcResp.Error.Code, rpcResp.Error.Message)
+	}
+
+	if len(rpcResp.Result.Content) == 0 {
+		return nil, fmt.Errorf("pikpak: mcp returned empty content")
+	}
+
+	text := rpcResp.Result.Content[0].Text
+	var res mcpAddLinkResult
+	if err := json.Unmarshal([]byte(text), &res); err != nil {
+		return nil, fmt.Errorf("pikpak: failed to parse add_link result %q: %w", text, err)
+	}
+
+	if res.TaskID == "" {
+		return nil, fmt.Errorf("pikpak: mcp add_link returned empty task_id: %s", text)
+	}
+
+	c.logger.Info().Str("task_id", res.TaskID).Str("file_name", res.FileName).Msg("pikpak: offline download added via MCP")
+
+	return &newTaskResponse{
+		UploadType: "UPLOAD_TYPE_URL",
+		Task: &pikpakTask{
+			ID:       res.TaskID,
+			FileName: res.FileName,
+			Name:     res.FileName,
+			Phase:    phaseRunning,
+		},
+	}, nil
+}
+
 // addOfflineDownload submits a magnet/url for offline downloading to the user's
 // special "DOWNLOAD" folder and returns the created task.
 func (c *apiClient) addOfflineDownload(ctx context.Context, fileURL, name string) (*newTaskResponse, error) {
+	// When token authentication is active, prefer PikPak's official Model Context Protocol (MCP)
+	// endpoint (pikpak.ai/mcp) to bypass third-party connected app quotas and captcha challenges.
+	if c.isTokenAuth {
+		resp, err := c.addOfflineDownloadMCP(ctx, fileURL)
+		if err == nil {
+			return resp, nil
+		}
+		c.logger.Warn().Err(err).Msg("pikpak: MCP add_link failed, falling back to direct REST")
+	}
+
 	body := map[string]any{
 		"kind":        kindFile,
 		"name":        name,
@@ -671,6 +863,10 @@ func (c *apiClient) addOfflineDownload(ctx context.Context, fileURL, name string
 
 	var resp newTaskResponse
 	if err := c.authCall(ctx, http.MethodPost, apiHost+"/drive/v1/files", nil, body, &resp); err != nil {
+		if c.accessToken != "" {
+			c.logger.Info().Err(err).Msg("pikpak: direct add failed, falling back to MCP add_link")
+			return c.addOfflineDownloadMCP(ctx, fileURL)
+		}
 		return nil, err
 	}
 	return &resp, nil
