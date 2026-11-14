@@ -1,6 +1,9 @@
 package pikpak
 
-import "fmt"
+import (
+	"fmt"
+	"strconv"
+)
 
 // File kinds returned by the PikPak drive API.
 const (
@@ -19,31 +22,73 @@ const (
 // apiError is the standard error envelope returned by PikPak endpoints.
 type apiError struct {
 	ErrorField  string `json:"error"`
-	Code        int    `json:"error_code"`
+	Code        any    `json:"error_code"`
 	Description string `json:"error_description"`
 	Message     string `json:"message,omitempty"`
+	UserMessage string `json:"user_message,omitempty"`
 	status      int
 }
 
+func (e *apiError) codeInt() int {
+	switch v := e.Code.(type) {
+	case int:
+		return v
+	case float64:
+		return int(v)
+	case int64:
+		return int(v)
+	case string:
+		n, _ := strconv.Atoi(v)
+		return n
+	default:
+		return 0
+	}
+}
+
+func (e *apiError) codeString() string {
+	switch v := e.Code.(type) {
+	case string:
+		return v
+	case int:
+		return strconv.Itoa(v)
+	case float64:
+		return strconv.Itoa(int(v))
+	case int64:
+		return strconv.FormatInt(v, 10)
+	default:
+		return ""
+	}
+}
+
 func (e *apiError) Error() string {
-	msg := e.Description
+	msg := e.UserMessage
+	if msg == "" {
+		msg = e.Description
+	}
 	if msg == "" {
 		msg = e.Message
 	}
 	if msg == "" {
 		msg = e.ErrorField
 	}
-	return fmt.Sprintf("pikpak: %s (code %d, status %d)", msg, e.Code, e.status)
+	if code := e.codeInt(); code != 0 {
+		return fmt.Sprintf("pikpak: %s (code %d, status %d)", msg, code, e.status)
+	}
+	if codeStr := e.codeString(); codeStr != "" {
+		return fmt.Sprintf("pikpak: %s (code %s, status %d)", msg, codeStr, e.status)
+	}
+	return fmt.Sprintf("pikpak: %s (status %d)", msg, e.status)
 }
 
 // authExpired reports whether the error means the access token is no longer valid.
 func (e *apiError) authExpired() bool {
-	return e.Code == 16 || e.status == 401
+	return e.codeInt() == 16 || e.status == 401
 }
 
 // captchaInvalid reports whether the call was rejected for a stale/invalid captcha.
 func (e *apiError) captchaInvalid() bool {
-	return e.Code == 9 || e.Code == 4002 || e.ErrorField == "captcha_invalid"
+	code := e.codeInt()
+	return code == 9 || code == 4002 || e.ErrorField == "captcha_invalid" || e.codeString() == "captcha_invalid"
 }
 
 // tokenResponse is returned by /v1/auth/signin and /v1/auth/token.

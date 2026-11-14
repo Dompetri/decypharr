@@ -321,7 +321,7 @@ func (c *apiClient) rawCall(ctx context.Context, method, rawurl string, params u
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var ae apiError
-		if len(data) > 0 && json.Unmarshal(data, &ae) == nil && (ae.ErrorField != "" || ae.Code != 0 || ae.Description != "" || ae.Message != "") {
+		if len(data) > 0 && json.Unmarshal(data, &ae) == nil && (ae.ErrorField != "" || ae.Code != nil || ae.Description != "" || ae.Message != "" || ae.UserMessage != "") {
 			ae.status = resp.StatusCode
 			return &ae
 		}
@@ -330,7 +330,7 @@ func (c *apiClient) rawCall(ctx context.Context, method, rawurl string, params u
 
 	if len(data) > 0 {
 		var ae apiError
-		if json.Unmarshal(data, &ae) == nil && (ae.ErrorField != "" || (ae.Code != 0 && (ae.Description != "" || ae.Message != ""))) {
+		if json.Unmarshal(data, &ae) == nil && (ae.ErrorField != "" || (ae.Code != nil && (ae.Description != "" || ae.Message != "" || ae.UserMessage != ""))) {
 			ae.status = resp.StatusCode
 			return &ae
 		}

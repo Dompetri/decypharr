@@ -290,6 +290,17 @@ func New(options ...ClientOption) *Client {
 
 		// Check for retryable status codes (only if resp is not nil)
 		if resp != nil {
+			if resp.StatusCode == http.StatusTooManyRequests {
+				if ra := resp.Header.Get("Retry-After"); ra != "" {
+					if secs, parseErr := strconv.Atoi(ra); parseErr == nil && time.Duration(secs)*time.Second > retryClient.RetryWaitMax {
+						// Don't retry if the server specifies a backoff longer than our maximum retry window
+						return false, nil
+					}
+					if t, parseErr := http.ParseTime(ra); parseErr == nil && time.Until(t) > retryClient.RetryWaitMax {
+						return false, nil
+					}
+				}
+			}
 			if _, ok := client.retryableStatus[resp.StatusCode]; ok {
 				return true, nil
 			}

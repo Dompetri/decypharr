@@ -1,6 +1,7 @@
 package pikpak
 
 import (
+	"encoding/json"
 	"net/http"
 	"testing"
 
@@ -57,6 +58,18 @@ func TestApiErrorFormat(t *testing.T) {
 	}
 	if got := err3.Error(); got != "pikpak: invalid_argument (code 3, status 400)" {
 		t.Errorf("unexpected error format: %s", got)
+	}
+
+	// Connected Apps quota error with string error_code and user_message
+	jsonPayload := []byte(`{"error_code":"CONNECTED_APPS_QUOTA_EXCEEDED","dimension":"cloud_download","user_message":"PikPak Connected Apps quota for Cloud Download has been reached. New offline download tasks will be blocked until Dec 1."}`)
+	var err4 apiError
+	if err := json.Unmarshal(jsonPayload, &err4); err != nil {
+		t.Fatalf("failed to unmarshal apiError with string error_code: %v", err)
+	}
+	err4.status = 429
+	expectedMsg := "pikpak: PikPak Connected Apps quota for Cloud Download has been reached. New offline download tasks will be blocked until Dec 1. (code CONNECTED_APPS_QUOTA_EXCEEDED, status 429)"
+	if got := err4.Error(); got != expectedMsg {
+		t.Errorf("unexpected error format for quota error:\ngot:  %s\nwant: %s", got, expectedMsg)
 	}
 }
 

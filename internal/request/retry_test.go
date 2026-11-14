@@ -52,3 +52,36 @@ func TestRetryPolicyPreservesUnlistedProviderStatus(t *testing.T) {
 		})
 	}
 }
+
+func TestRetryPolicySkipsLongRetryAfter(t *testing.T) {
+	config.SetConfigPath(t.TempDir())
+	t.Cleanup(config.Reset)
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Retry-After", "1376331")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error_code":"CONNECTED_APPS_QUOTA_EXCEEDED"}`)
+	}))
+	defer server.Close()
+
+	opts := []ClientOption{
+		WithMaxRetries(3),
+		WithRetryableStatus(http.StatusTooManyRequests),
+	}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := New(opts...).Do(req)
+	if err != nil {
+		t.Fatalf("expected immediate 429 response without error, got err=%v", err)
+	}
+	defer DrainAndClose(resp.Body)
+	if calls.Load() != 1 {
+		t.Fatalf("expected exactly 1 call (no retries), got %d", calls.Load())
+	}
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("expected status 429, got %d", resp.StatusCode)
+	}
+}

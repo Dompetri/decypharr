@@ -499,6 +499,7 @@ func (m *Manager) rehydrateEvicted(ctx context.Context, entry *storage.Entry, wa
 		defer cancel()
 		if err := m.rehydrateReAdd(hctx, entry); err != nil {
 			call.err = err
+			m.logger.Error().Err(err).Str("name", entry.Name).Str("infohash", infohash).Msg("eviction: re-hydration failed")
 			return
 		}
 		entry.Bad = false
