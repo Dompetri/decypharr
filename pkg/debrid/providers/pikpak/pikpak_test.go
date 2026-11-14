@@ -3,6 +3,8 @@ package pikpak
 import (
 	"net/http"
 	"testing"
+
+	"github.com/sirrobot01/decypharr/internal/config"
 )
 
 func TestActionFor(t *testing.T) {
@@ -55,5 +57,94 @@ func TestApiErrorFormat(t *testing.T) {
 	}
 	if got := err3.Error(); got != "pikpak: invalid_argument (code 3, status 400)" {
 		t.Errorf("unexpected error format: %s", got)
+	}
+}
+
+func TestParseCredentials(t *testing.T) {
+	// Username / password format
+	c1, err := parseCredentials("myuser:mypassword")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c1.username != "myuser" || c1.password != "mypassword" || c1.token != "" {
+		t.Errorf("expected username/pass, got %+v", c1)
+	}
+
+	// Bearer prefix
+	c2, err := parseCredentials("Bearer eyJhbGciOi...")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c2.token != "eyJhbGciOi..." || c2.username != "" {
+		t.Errorf("expected token, got %+v", c2)
+	}
+
+	// token: prefix
+	c3, err := parseCredentials("token:my-token-123")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c3.token != "my-token-123" {
+		t.Errorf("expected token, got %+v", c3)
+	}
+
+	// Raw JWT starting with eyJ
+	c4, err := parseCredentials("eyJhbGciOi...")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c4.token != "eyJhbGciOi..." {
+		t.Errorf("expected token, got %+v", c4)
+	}
+
+	// Opaque token without colon
+	c5, err := parseCredentials("some-opaque-api-token")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c5.token != "some-opaque-api-token" {
+		t.Errorf("expected token, got %+v", c5)
+	}
+
+	// Empty
+	_, err = parseCredentials("")
+	if err == nil {
+		t.Errorf("expected error for empty api_key")
+	}
+}
+
+func TestExtractJWTSub(t *testing.T) {
+	// Dummy JWT with sub="test-user-123"
+	// header: {"alg":"none"} -> eyJhbGciOiJub25lIn0
+	// payload: {"sub":"test-user-123"} -> eyJzdWIiOiJ0ZXN0LXVzZXItMTIzIn0
+	dummyJWT := "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0LXVzZXItMTIzIn0."
+	if got := extractJWTSub(dummyJWT); got != "test-user-123" {
+		t.Errorf("expected 'test-user-123', got %q", got)
+	}
+
+	if got := extractJWTSub("not-a-jwt"); got != "" {
+		t.Errorf("expected empty for invalid jwt, got %q", got)
+	}
+}
+
+func TestPikpakNewWithToken(t *testing.T) {
+	config.SetConfigPath(t.TempDir())
+	dummyJWT := "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0LXVzZXItNDU2In0."
+	dc := config.Debrid{
+		Name:   "pikpak",
+		APIKey: dummyJWT,
+	}
+	p, err := New(dc, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating Pikpak provider with token: %v", err)
+	}
+	if !p.client.isTokenAuth {
+		t.Errorf("expected client.isTokenAuth to be true")
+	}
+	if p.client.accessToken != dummyJWT {
+		t.Errorf("expected client.accessToken to be %q, got %q", dummyJWT, p.client.accessToken)
+	}
+	if p.client.getUserID() != "test-user-456" {
+		t.Errorf("expected userID to be 'test-user-456', got %q", p.client.getUserID())
 	}
 }

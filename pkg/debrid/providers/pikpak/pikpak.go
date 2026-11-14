@@ -59,22 +59,59 @@ func infohashFromMagnet(magnet string) string {
 	return strings.ToLower(utils.ExtractInfoHash(magnet))
 }
 
-// parseCredentials extracts the PikPak username and password from the api_key
-// field, which is expected to be in "username:password" format.
-func parseCredentials(apiKey string) (string, string, error) {
-	parts := strings.SplitN(apiKey, ":", 2)
-	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || parts[1] == "" {
-		return "", "", fmt.Errorf(`pikpak: api_key must be in "username:password" format`)
+type credentials struct {
+	username string
+	password string
+	token    string
+}
+
+// parseCredentials extracts the PikPak credentials from the api_key field.
+// Supports:
+// 1. Bearer token format: "Bearer <token>", "token:<token>", or a direct JWT ("eyJ...")
+// 2. Username/password format: "username:password"
+func parseCredentials(apiKey string) (credentials, error) {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return credentials{}, fmt.Errorf("pikpak: api_key is required")
 	}
-	return strings.TrimSpace(parts[0]), parts[1], nil
+
+	if strings.HasPrefix(strings.ToLower(apiKey), "bearer ") {
+		token := strings.TrimSpace(apiKey[7:])
+		return credentials{token: token}, nil
+	}
+	if strings.HasPrefix(apiKey, "token:") {
+		token := strings.TrimSpace(strings.TrimPrefix(apiKey, "token:"))
+		return credentials{token: token}, nil
+	}
+	if strings.HasPrefix(apiKey, "eyJ") {
+		return credentials{token: apiKey}, nil
+	}
+
+	parts := strings.SplitN(apiKey, ":", 2)
+	if len(parts) == 2 && strings.TrimSpace(parts[0]) != "" && parts[1] != "" {
+		return credentials{username: strings.TrimSpace(parts[0]), password: parts[1]}, nil
+	}
+
+	if !strings.Contains(apiKey, ":") {
+		return credentials{token: apiKey}, nil
+	}
+
+	return credentials{}, fmt.Errorf(`pikpak: api_key must be in "username:password" or token format`)
 }
 
 func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Pikpak, error) {
 	cfg := config.Get()
 
-	username, password, err := parseCredentials(dc.APIKey)
+	creds, err := parseCredentials(dc.APIKey)
 	if err != nil {
 		return nil, err
+	}
+
+	username := creds.username
+	password := creds.password
+	token := creds.token
+	if token != "" && username == "" {
+		username = extractJWTSub(token)
 	}
 
 	_log := logger.New(dc.Name)
@@ -97,7 +134,7 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Pikpak, er
 		Host:                  apiHost,
 		username:              username,
 		password:              password,
-		client:                newAPIClient(request.New(opts...), _log, username, password),
+		client:                newAPIClient(request.New(opts...), _log, username, password, token),
 		accountsManager:       account.NewManager(dc, ratelimits["download"], _log),
 		autoExpiresLinksAfter: autoExpiresLinksAfter,
 		logger:                _log,
@@ -875,10 +912,16 @@ func (p *Pikpak) GetProfile() (*types.Profile, error) {
 		Type:     "free",
 	}
 
+	if profile.Username == "" {
+		profile.Username = p.client.getUserID()
+	}
+
 	if info, err := p.client.getUserInfo(ctx); err == nil && info != nil {
 		profile.Email = info.Email
 		if info.Email != "" {
 			profile.Username = info.Email
+		} else if info.Name != "" && profile.Username == "" {
+			profile.Username = info.Name
 		}
 	}
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/md5"
 	"crypto/sha1"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -105,11 +106,12 @@ func deviceSign(deviceID string) string {
 
 // apiClient handles authentication (access token + captcha) and signed requests.
 type apiClient struct {
-	http     *request.Client
-	logger   zerolog.Logger
-	deviceID string
-	username string
-	password string
+	http        *request.Client
+	logger      zerolog.Logger
+	deviceID    string
+	username    string
+	password    string
+	isTokenAuth bool
 
 	// mu serializes login/refresh (held across the network handshake), so any
 	// helper invoked during login/refresh must NOT try to acquire it.
@@ -149,16 +151,52 @@ func (c *apiClient) setUserID(id string) {
 	c.userID.Store(&id)
 }
 
-func newAPIClient(httpClient *request.Client, logger zerolog.Logger, username, password string) *apiClient {
-	// A stable device id per credential pair avoids re-triggering device
-	// verification on every restart.
-	deviceID := md5Hex(username + password)
-	return &apiClient{
+func extractJWTSub(token string) string {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	payload := parts[1]
+	switch len(payload) % 4 {
+	case 2:
+		payload += "=="
+	case 3:
+		payload += "="
+	}
+	data, err := base64.RawURLEncoding.DecodeString(payload)
+	if err != nil {
+		data, err = base64.URLEncoding.DecodeString(payload)
+		if err != nil {
+			return ""
+		}
+	}
+	var claims struct {
+		Sub string `json:"sub"`
+	}
+	if err := json.Unmarshal(data, &claims); err == nil {
+		return claims.Sub
+	}
+	return ""
+}
+
+func newAPIClient(httpClient *request.Client, logger zerolog.Logger, username, password, token string) *apiClient {
+	var deviceID string
+	if token != "" {
+		deviceID = md5Hex(token)
+	} else {
+		// A stable device id per credential pair avoids re-triggering device
+		// verification on every restart.
+		deviceID = md5Hex(username + password)
+	}
+
+	c := &apiClient{
 		http:          httpClient,
 		logger:        logger,
 		deviceID:      deviceID,
 		username:      username,
 		password:      password,
+		isTokenAuth:   token != "",
+		accessToken:   token,
 		captchaTokens: make(map[string]captchaItem),
 		davClient: &http.Client{
 			Timeout: 30 * time.Second,
@@ -169,6 +207,15 @@ func newAPIClient(httpClient *request.Client, logger zerolog.Logger, username, p
 			},
 		},
 	}
+
+	if token != "" {
+		if sub := extractJWTSub(token); sub != "" {
+			c.setUserID(sub)
+		}
+		c.tokenExpiry = time.Now().Add(90 * 24 * time.Hour)
+	}
+
+	return c
 }
 
 // setDavProxy routes the WebDAV resolve (davClient) through proxyURL. PikPak
@@ -457,6 +504,13 @@ func (c *apiClient) ensureLogin(ctx context.Context) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if c.isTokenAuth {
+		if c.accessToken == "" {
+			return "", fmt.Errorf("pikpak: token is empty")
+		}
+		return c.accessToken, nil
+	}
+
 	if c.accessToken == "" {
 		if err := c.loginLocked(ctx); err != nil {
 			return "", err
@@ -479,6 +533,11 @@ func (c *apiClient) ensureLogin(ctx context.Context) (string, error) {
 func (c *apiClient) forceRefresh(ctx context.Context) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	if c.isTokenAuth {
+		return c.accessToken, fmt.Errorf("pikpak: token is expired or unauthorized")
+	}
+
 	if err := c.refreshLocked(ctx); err != nil {
 		if err := c.loginLocked(ctx); err != nil {
 			return "", err
@@ -497,15 +556,20 @@ func (c *apiClient) authCall(ctx context.Context, method, rawurl string, params 
 	}
 
 	action := actionFor(method, rawurl)
-	captcha, err := c.ensureCaptcha(ctx, action)
-	if err != nil {
-		return err
+	var captcha string
+	if !c.isTokenAuth {
+		captcha, err = c.ensureCaptcha(ctx, action)
+		if err != nil {
+			return err
+		}
 	}
 
 	doRequest := func(tok, cap string) error {
 		headers := c.baseHeaders()
 		headers["Authorization"] = "Bearer " + tok
-		headers["X-Captcha-Token"] = cap
+		if cap != "" {
+			headers["X-Captcha-Token"] = cap
+		}
 		return c.rawCall(ctx, method, rawurl, params, body, headers, out)
 	}
 
@@ -523,6 +587,9 @@ func (c *apiClient) authCall(ctx context.Context, method, rawurl string, params 
 		lastErr = ae
 		switch {
 		case ae.authExpired():
+			if c.isTokenAuth {
+				return fmt.Errorf("pikpak: token expired or invalid (HTTP %d)", ae.status)
+			}
 			token, err = c.forceRefresh(ctx)
 			if err != nil {
 				return err
@@ -648,6 +715,12 @@ func (c *apiClient) getAbout(ctx context.Context) (*aboutResponse, error) {
 
 // getUserInfo returns the authenticated user's profile.
 func (c *apiClient) getUserInfo(ctx context.Context) (*userInfo, error) {
+	if c.isTokenAuth {
+		return &userInfo{
+			Sub:  c.getUserID(),
+			Name: c.getUserID(),
+		}, nil
+	}
 	var info userInfo
 	if err := c.authCall(ctx, http.MethodGet, userHost+"/v1/user/me", nil, nil, &info); err != nil {
 		return nil, err
