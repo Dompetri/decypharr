@@ -60,31 +60,47 @@ func infohashFromMagnet(magnet string) string {
 }
 
 type credentials struct {
-	username string
-	password string
-	token    string
+	username     string
+	password     string
+	token        string
+	refreshToken string
 }
 
 // parseCredentials extracts the PikPak credentials from the api_key field.
 // Supports:
-// 1. Bearer token format: "Bearer <token>", "token:<token>", or a direct JWT ("eyJ...")
-// 2. Username/password format: "username:password"
+// 1. Bearer token format: "Bearer <token>", "token:<token>", or direct JWT ("eyJ...")
+// 2. Token with refresh token: "<access_token>:<refresh_token>" or "Bearer <access_token>:<refresh_token>"
+// 3. Username/password format: "username:password"
 func parseCredentials(apiKey string) (credentials, error) {
 	apiKey = strings.TrimSpace(apiKey)
 	if apiKey == "" {
 		return credentials{}, fmt.Errorf("pikpak: api_key is required")
 	}
 
-	if strings.HasPrefix(strings.ToLower(apiKey), "bearer ") {
-		token := strings.TrimSpace(apiKey[7:])
-		return credentials{token: token}, nil
-	}
 	if strings.HasPrefix(apiKey, "token:") {
-		token := strings.TrimSpace(strings.TrimPrefix(apiKey, "token:"))
-		return credentials{token: token}, nil
+		tokenStr := strings.TrimSpace(strings.TrimPrefix(apiKey, "token:"))
+		if strings.Contains(tokenStr, ":") {
+			parts := strings.SplitN(tokenStr, ":", 2)
+			return credentials{token: parts[0], refreshToken: strings.TrimSpace(parts[1])}, nil
+		}
+		return credentials{token: tokenStr}, nil
 	}
-	if strings.HasPrefix(apiKey, "eyJ") {
-		return credentials{token: apiKey}, nil
+
+	tokenStr := apiKey
+	if strings.HasPrefix(strings.ToLower(tokenStr), "bearer ") {
+		tokenStr = strings.TrimSpace(tokenStr[7:])
+	}
+
+	// Check if tokenStr has "accessToken:refreshToken" format
+	if strings.Contains(tokenStr, ":") {
+		parts := strings.SplitN(tokenStr, ":", 2)
+		if strings.HasPrefix(parts[0], "eyJ") {
+			return credentials{token: parts[0], refreshToken: strings.TrimSpace(parts[1])}, nil
+		}
+	}
+
+	if strings.HasPrefix(tokenStr, "eyJ") {
+		return credentials{token: tokenStr}, nil
 	}
 
 	parts := strings.SplitN(apiKey, ":", 2)
@@ -134,7 +150,7 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Pikpak, er
 		Host:                  apiHost,
 		username:              username,
 		password:              password,
-		client:                newAPIClient(request.New(opts...), _log, username, password, token),
+		client:                newAPIClient(request.New(opts...), _log, username, password, token, creds.refreshToken),
 		accountsManager:       account.NewManager(dc, ratelimits["download"], _log),
 		autoExpiresLinksAfter: autoExpiresLinksAfter,
 		logger:                _log,

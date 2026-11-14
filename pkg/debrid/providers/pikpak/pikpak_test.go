@@ -102,7 +102,16 @@ func TestParseCredentials(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if c3.token != "my-token-123" {
-		t.Errorf("expected token, got %+v", c3)
+		t.Errorf("expected token:my-token-123, got %+v", c3)
+	}
+
+	// Token with refresh token format
+	cRef, err := parseCredentials("Bearer eyJhbGciOi...:os.refresh-token-456")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cRef.token != "eyJhbGciOi..." || cRef.refreshToken != "os.refresh-token-456" {
+		t.Errorf("expected token and refresh token, got %+v", cRef)
 	}
 
 	// Raw JWT starting with eyJ
@@ -258,7 +267,7 @@ func TestAddOfflineDownloadMCP(t *testing.T) {
 	defer func() { mcpHost = oldHost }()
 
 	httpClient := request.New()
-	client := newAPIClient(httpClient, zerolog.Nop(), "", "", "test-mcp-token")
+	client := newAPIClient(httpClient, zerolog.Nop(), "", "", "test-mcp-token", "")
 
 	resp, err := client.addOfflineDownload(t.Context(), "magnet:?xt=urn:btih:12345", "TestMovie.2024.mkv")
 	if err != nil {
@@ -279,5 +288,72 @@ func TestAddOfflineDownloadMCP(t *testing.T) {
 	}
 	if resp.Task.FileName != "TestMovie.2024.mkv" {
 		t.Errorf("expected Task.FileName = 'TestMovie.2024.mkv', got %q", resp.Task.FileName)
+	}
+}
+
+func TestRefreshWebToken(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/auth/token" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("x-client-id") != "YUMx5nI8ZU8Ap8pm" {
+			t.Errorf("expected x-client-id header 'YUMx5nI8ZU8Ap8pm', got %q", r.Header.Get("x-client-id"))
+		}
+		var req struct {
+			ClientID     string `json:"client_id"`
+			RefreshToken string `json:"refresh_token"`
+			GrantType    string `json:"grant_type"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.ClientID != "YUMx5nI8ZU8Ap8pm" {
+			t.Errorf("expected client_id in body 'YUMx5nI8ZU8Ap8pm', got %q", req.ClientID)
+		}
+		if req.RefreshToken != "os.initial-refresh-token" {
+			t.Errorf("expected refresh_token 'os.initial-refresh-token', got %q", req.RefreshToken)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token_type":    "Bearer",
+			"access_token":  "new-access-token-789",
+			"refresh_token": "os.rotated-refresh-token-999",
+			"expires_in":    7200,
+			"sub":           "user-sub-123",
+		})
+	}))
+	defer ts.Close()
+
+	oldHost := userHost
+	userHost = ts.URL
+	defer func() { userHost = oldHost }()
+
+	client := &apiClient{
+		http:          request.New(),
+		logger:        zerolog.Nop(),
+		isTokenAuth:   true,
+		tokenClientID: "YUMx5nI8ZU8Ap8pm",
+		accessToken:   "initial-access-token",
+		refreshToken:  "os.initial-refresh-token",
+		tokenExpiry:   time.Now().Add(-10 * time.Minute), // expired
+	}
+
+	if err := client.refreshLocked(t.Context()); err != nil {
+		t.Fatalf("unexpected error refreshing web token: %v", err)
+	}
+
+	if client.accessToken != "new-access-token-789" {
+		t.Errorf("expected accessToken = 'new-access-token-789', got %q", client.accessToken)
+	}
+	if client.refreshToken != "os.rotated-refresh-token-999" {
+		t.Errorf("expected refreshToken = 'os.rotated-refresh-token-999', got %q", client.refreshToken)
+	}
+	if client.getUserID() != "user-sub-123" {
+		t.Errorf("expected userID = 'user-sub-123', got %q", client.getUserID())
+	}
+	if client.tokenExpiry.Before(time.Now().Add(7100 * time.Second)) {
+		t.Errorf("expected tokenExpiry around 7200s in future, got %v", client.tokenExpiry)
 	}
 }

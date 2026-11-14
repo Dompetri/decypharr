@@ -33,13 +33,15 @@ const (
 	sdkVersion    = "2.0.4.204000"
 	appName       = packageName
 
-	userHost     = "https://user.mypikpak.com"
 	apiHost      = "https://api-drive.mypikpak.com"
 	davHost      = "https://api-dav.mypikpak.com" // WebDAV management API
 	davServeHost = "https://dav.mypikpak.com"     // WebDAV file-serving host
 )
 
-var mcpHost = "https://pikpak.ai/mcp"
+var (
+	userHost = "https://user.mypikpak.com"
+	mcpHost  = "https://pikpak.ai/mcp"
+)
 
 // davCreds holds Basic-auth credentials for the WebDAV serving host.
 type davCreds struct {
@@ -148,6 +150,9 @@ type apiClient struct {
 	// MCP session state for captcha-free link submission via pikpak.ai/mcp.
 	mcpMu        sync.Mutex
 	mcpSessionID string
+
+	// tokenClientID stores the client_id extracted from JWT audience (e.g. YUMx5nI8ZU8Ap8pm for web tokens).
+	tokenClientID string
 }
 
 func (c *apiClient) getUserID() string {
@@ -161,10 +166,16 @@ func (c *apiClient) setUserID(id string) {
 	c.userID.Store(&id)
 }
 
-func extractJWTSub(token string) string {
+type jwtClaims struct {
+	Sub string `json:"sub"`
+	Aud string `json:"aud"`
+	Exp int64  `json:"exp"`
+}
+
+func extractJWTClaims(token string) jwtClaims {
 	parts := strings.Split(token, ".")
 	if len(parts) < 2 {
-		return ""
+		return jwtClaims{}
 	}
 	payload := parts[1]
 	switch len(payload) % 4 {
@@ -177,19 +188,19 @@ func extractJWTSub(token string) string {
 	if err != nil {
 		data, err = base64.URLEncoding.DecodeString(payload)
 		if err != nil {
-			return ""
+			return jwtClaims{}
 		}
 	}
-	var claims struct {
-		Sub string `json:"sub"`
-	}
-	if err := json.Unmarshal(data, &claims); err == nil {
-		return claims.Sub
-	}
-	return ""
+	var claims jwtClaims
+	_ = json.Unmarshal(data, &claims)
+	return claims
 }
 
-func newAPIClient(httpClient *request.Client, logger zerolog.Logger, username, password, token string) *apiClient {
+func extractJWTSub(token string) string {
+	return extractJWTClaims(token).Sub
+}
+
+func newAPIClient(httpClient *request.Client, logger zerolog.Logger, username, password, token, refreshToken string) *apiClient {
 	var deviceID string
 	if token != "" {
 		deviceID = md5Hex(token)
@@ -207,6 +218,7 @@ func newAPIClient(httpClient *request.Client, logger zerolog.Logger, username, p
 		password:      password,
 		isTokenAuth:   token != "",
 		accessToken:   token,
+		refreshToken:  refreshToken,
 		captchaTokens: make(map[string]captchaItem),
 		davClient: &http.Client{
 			Timeout: 30 * time.Second,
@@ -219,10 +231,18 @@ func newAPIClient(httpClient *request.Client, logger zerolog.Logger, username, p
 	}
 
 	if token != "" {
-		if sub := extractJWTSub(token); sub != "" {
-			c.setUserID(sub)
+		claims := extractJWTClaims(token)
+		if claims.Sub != "" {
+			c.setUserID(claims.Sub)
 		}
-		c.tokenExpiry = time.Now().Add(90 * 24 * time.Hour)
+		if claims.Aud != "" {
+			c.tokenClientID = claims.Aud
+		}
+		if claims.Exp > 0 {
+			c.tokenExpiry = time.Unix(claims.Exp, 0)
+		} else {
+			c.tokenExpiry = time.Now().Add(90 * 24 * time.Hour)
+		}
 	}
 
 	return c
@@ -478,19 +498,31 @@ func (c *apiClient) refreshLocked(ctx context.Context) error {
 	if c.refreshToken == "" {
 		return fmt.Errorf("pikpak: no refresh token available")
 	}
+	cID := clientID
+	if c.isTokenAuth && c.tokenClientID != "" {
+		cID = c.tokenClientID
+	}
 	body := map[string]string{
-		"client_id":     clientID,
+		"client_id":     cID,
 		"refresh_token": c.refreshToken,
 		"grant_type":    "refresh_token",
 	}
+	headers := c.baseHeaders()
+	if cID != clientID {
+		headers["x-client-id"] = cID
+		headers["x-sdk-version"] = "8.1.4"
+		headers["x-protocol-version"] = "301"
+		headers["Origin"] = "https://mypikpak.com"
+	}
 	var tok tokenResponse
-	if err := c.rawCall(ctx, http.MethodPost, userHost+"/v1/auth/token", nil, body, c.baseHeaders(), &tok); err != nil {
+	if err := c.rawCall(ctx, http.MethodPost, userHost+"/v1/auth/token", nil, body, headers, &tok); err != nil {
 		return fmt.Errorf("pikpak: token refresh failed: %w", err)
 	}
 	if tok.AccessToken == "" {
 		return fmt.Errorf("pikpak: refresh returned empty access token")
 	}
 	c.applyTokenLocked(&tok)
+	c.logger.Info().Time("expiry", c.tokenExpiry).Msg("pikpak: access token refreshed successfully")
 	return nil
 }
 
@@ -543,6 +575,11 @@ func (c *apiClient) ensureLogin(ctx context.Context) (string, error) {
 		if c.accessToken == "" {
 			return "", fmt.Errorf("pikpak: token is empty")
 		}
+		if c.refreshToken != "" && time.Now().After(c.tokenExpiry.Add(-60*time.Second)) {
+			if err := c.refreshLocked(ctx); err != nil {
+				c.logger.Warn().Err(err).Msg("pikpak: token refresh failed")
+			}
+		}
 		return c.accessToken, nil
 	}
 
@@ -580,6 +617,11 @@ func (c *apiClient) forceRefresh(ctx context.Context) (string, error) {
 	defer c.mu.Unlock()
 
 	if c.isTokenAuth {
+		if c.refreshToken != "" {
+			if err := c.refreshLocked(ctx); err == nil {
+				return c.accessToken, nil
+			}
+		}
 		return c.accessToken, fmt.Errorf("pikpak: token is expired or unauthorized")
 	}
 
@@ -637,7 +679,7 @@ func (c *apiClient) authCall(ctx context.Context, method, rawurl string, params 
 		lastErr = ae
 		switch {
 		case ae.authExpired():
-			if c.isTokenAuth {
+			if c.isTokenAuth && c.refreshToken == "" {
 				return fmt.Errorf("pikpak: token expired or invalid (HTTP %d)", ae.status)
 			}
 			token, err = c.forceRefresh(ctx)
