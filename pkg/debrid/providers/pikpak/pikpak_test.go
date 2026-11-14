@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/sirrobot01/decypharr/internal/config"
 )
@@ -159,5 +160,27 @@ func TestPikpakNewWithToken(t *testing.T) {
 	}
 	if p.client.getUserID() != "test-user-456" {
 		t.Errorf("expected userID to be 'test-user-456', got %q", p.client.getUserID())
+	}
+}
+
+func TestLoginBackoffOnFailure(t *testing.T) {
+	c := &apiClient{
+		username: "user@example.com",
+		password: "secretpassword",
+	}
+	rateLimitedErr := &apiError{
+		Code:        4002,
+		Description: "Aborted - Your operation is too frequent, please try again later",
+		status:      400,
+	}
+	c.recordLoginFailureLocked(rateLimitedErr)
+	if c.loginBackoff < 2*time.Minute {
+		t.Fatalf("expected loginBackoff >= 2m for rate limited error, got %v", c.loginBackoff)
+	}
+	ctx := t.Context()
+	// Next ensureLogin should return cached error without calling network
+	_, err := c.ensureLogin(ctx)
+	if err != rateLimitedErr {
+		t.Fatalf("expected cached rateLimitedErr, got %v", err)
 	}
 }

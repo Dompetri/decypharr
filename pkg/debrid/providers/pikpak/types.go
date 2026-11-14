@@ -85,10 +85,15 @@ func (e *apiError) authExpired() bool {
 	return e.codeInt() == 16 || e.status == 401
 }
 
+// isRateLimited reports whether the error is a temporary rate limit or "operation too frequent".
+func (e *apiError) isRateLimited() bool {
+	return e.codeInt() == 4002 || e.status == 429
+}
+
 // captchaInvalid reports whether the call was rejected for a stale/invalid captcha.
 func (e *apiError) captchaInvalid() bool {
 	code := e.codeInt()
-	return code == 9 || code == 4002 || e.ErrorField == "captcha_invalid" || e.codeString() == "captcha_invalid"
+	return code == 9 || e.ErrorField == "captcha_invalid" || e.codeString() == "captcha_invalid"
 }
 
 // tokenResponse is returned by /v1/auth/signin and /v1/auth/token.

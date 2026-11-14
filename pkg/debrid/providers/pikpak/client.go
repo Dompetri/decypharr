@@ -7,6 +7,7 @@ import (
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -115,10 +116,13 @@ type apiClient struct {
 
 	// mu serializes login/refresh (held across the network handshake), so any
 	// helper invoked during login/refresh must NOT try to acquire it.
-	mu           sync.Mutex
-	accessToken  string
-	refreshToken string
-	tokenExpiry  time.Time
+	mu            sync.Mutex
+	accessToken   string
+	refreshToken  string
+	tokenExpiry   time.Time
+	lastLoginErr  error
+	lastLoginTime time.Time
+	loginBackoff  time.Duration
 
 	// captcha is a reusable captcha token attached to every authenticated request
 	// (PikPak rejects calls without one). Tokens are cached per action.
@@ -499,6 +503,31 @@ func (c *apiClient) applyTokenLocked(tok *tokenResponse) {
 	c.tokenExpiry = time.Now().Add(time.Duration(expires) * time.Second)
 }
 
+func (c *apiClient) recordLoginFailureLocked(err error) {
+	c.lastLoginErr = err
+	c.lastLoginTime = time.Now()
+	var ae *apiError
+	if errors.As(err, &ae) && ae.isRateLimited() {
+		// Rate limit from PikPak (e.g. 4002): back off for at least 2 minutes so the cooldown can clear
+		if c.loginBackoff < 2*time.Minute {
+			c.loginBackoff = 2 * time.Minute
+		} else {
+			c.loginBackoff = min(c.loginBackoff*2, 10*time.Minute)
+		}
+	} else {
+		if c.loginBackoff == 0 {
+			c.loginBackoff = 15 * time.Second
+		} else {
+			c.loginBackoff = min(c.loginBackoff*2, 5*time.Minute)
+		}
+	}
+}
+
+func (c *apiClient) recordLoginSuccessLocked() {
+	c.lastLoginErr = nil
+	c.loginBackoff = 0
+}
+
 // ensureLogin guarantees a valid access token, logging in or refreshing as needed.
 func (c *apiClient) ensureLogin(ctx context.Context) (string, error) {
 	c.mu.Lock()
@@ -512,18 +541,28 @@ func (c *apiClient) ensureLogin(ctx context.Context) (string, error) {
 	}
 
 	if c.accessToken == "" {
+		if c.lastLoginErr != nil && time.Since(c.lastLoginTime) < c.loginBackoff {
+			return "", c.lastLoginErr
+		}
 		if err := c.loginLocked(ctx); err != nil {
+			c.recordLoginFailureLocked(err)
 			return "", err
 		}
+		c.recordLoginSuccessLocked()
 		return c.accessToken, nil
 	}
 
 	if time.Now().After(c.tokenExpiry.Add(-60 * time.Second)) {
 		if err := c.refreshLocked(ctx); err != nil {
 			// Refresh failed; fall back to a fresh login.
+			if c.lastLoginErr != nil && time.Since(c.lastLoginTime) < c.loginBackoff {
+				return "", c.lastLoginErr
+			}
 			if err := c.loginLocked(ctx); err != nil {
+				c.recordLoginFailureLocked(err)
 				return "", err
 			}
+			c.recordLoginSuccessLocked()
 		}
 	}
 	return c.accessToken, nil
@@ -539,9 +578,14 @@ func (c *apiClient) forceRefresh(ctx context.Context) (string, error) {
 	}
 
 	if err := c.refreshLocked(ctx); err != nil {
+		if c.lastLoginErr != nil && time.Since(c.lastLoginTime) < c.loginBackoff {
+			return "", c.lastLoginErr
+		}
 		if err := c.loginLocked(ctx); err != nil {
+			c.recordLoginFailureLocked(err)
 			return "", err
 		}
+		c.recordLoginSuccessLocked()
 	}
 	return c.accessToken, nil
 }
