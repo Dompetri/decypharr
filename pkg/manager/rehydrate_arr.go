@@ -190,6 +190,17 @@ func (m *Manager) rebuildOne(ctx context.Context, a arr.Arr, provider, folder st
 
 	_, downloadID, herr := m.arr.LatestGrabID(ctx, a.Name, c.mediaID)
 	if herr != nil || downloadID == "" {
+		if item, err := m.GetEntryItem(folder); err == nil && item != nil {
+			for _, f := range item.Files {
+				if f != nil && f.InfoHash != "" && looksLikeInfohash(f.InfoHash) {
+					downloadID = f.InfoHash
+					herr = nil
+					break
+				}
+			}
+		}
+	}
+	if herr != nil || downloadID == "" {
 		res.Status = "no_history"
 		if herr != nil {
 			res.Error = herr.Error()

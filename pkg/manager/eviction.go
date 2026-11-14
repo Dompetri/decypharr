@@ -583,19 +583,43 @@ func (m *Manager) rehydrateReAdd(ctx context.Context, entry *storage.Entry) erro
 	}
 	now := time.Now()
 	for _, f := range dbt.GetFiles() {
+		matchedName := ""
 		if ex, ok := entry.Files[f.Name]; ok && ex != nil {
+			matchedName = f.Name
 			ex.Size = f.Size
 			ex.ByteRange = f.ByteRange
 			ex.Deleted = false
 			ex.InfoHash = entry.InfoHash
 		} else {
-			entry.Files[f.Name] = &storage.File{
-				Name:      f.Name,
-				Size:      f.Size,
-				ByteRange: f.ByteRange,
-				Deleted:   false,
-				InfoHash:  entry.InfoHash,
-				AddedOn:   now,
+			normRemote := utils.NormalizeDupName(f.Name)
+			for exName, ex := range entry.Files {
+				if exName == f.Name || utils.NormalizeDupName(exName) == normRemote || len(entry.Files) == 1 {
+					matchedName = exName
+					ex.Size = f.Size
+					ex.ByteRange = f.ByteRange
+					ex.Deleted = false
+					ex.InfoHash = entry.InfoHash
+					break
+				}
+			}
+			if matchedName == "" {
+				matchedName = f.Name
+				entry.Files[f.Name] = &storage.File{
+					Name:      f.Name,
+					Size:      f.Size,
+					ByteRange: f.ByteRange,
+					Deleted:   false,
+					InfoHash:  entry.InfoHash,
+					AddedOn:   now,
+				}
+			}
+		}
+		if pe := entry.Providers[entry.ActiveProvider]; pe != nil && matchedName != "" && matchedName != f.Name {
+			if pe.Files == nil {
+				pe.Files = make(map[string]*storage.ProviderFile)
+			}
+			if pf, ok := pe.Files[f.Name]; ok && pf != nil {
+				pe.Files[matchedName] = pf
 			}
 		}
 	}

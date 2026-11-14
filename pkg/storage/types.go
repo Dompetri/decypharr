@@ -5,6 +5,7 @@ import (
 	"math"
 	"path"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sirrobot01/decypharr/internal/config"
@@ -152,14 +153,31 @@ func (e *EntryItem) GetFile(filename string) (*File, error) {
 	if e.Files == nil {
 		return nil, fmt.Errorf("failed to get entry item, file is nil")
 	}
-	f, exists := e.Files[filename]
-	if !exists {
-		return nil, fmt.Errorf("failed to get entry item, file does not exist")
+	if f, exists := e.Files[filename]; exists && !f.Deleted {
+		return f, nil
 	}
-	if f.Deleted {
+	// Fallback 1: if single active file, return it
+	if len(e.Files) == 1 {
+		for _, f := range e.Files {
+			if !f.Deleted {
+				return f, nil
+			}
+		}
+	}
+	// Fallback 2: match by normalized duplicate name or case-insensitivity
+	normTarget := utils.NormalizeDupName(filename)
+	for name, f := range e.Files {
+		if f.Deleted {
+			continue
+		}
+		if utils.NormalizeDupName(name) == normTarget || strings.EqualFold(name, filename) {
+			return f, nil
+		}
+	}
+	if f, exists := e.Files[filename]; exists && f.Deleted {
 		return nil, fmt.Errorf("failed to get entry item, file is deleted")
 	}
-	return f, nil
+	return nil, fmt.Errorf("failed to get entry item, file does not exist")
 }
 
 func (e *EntryItem) GetSize() int64 {
@@ -432,14 +450,31 @@ func (e *Entry) GetFile(filename string) (*File, error) {
 	if e.Files == nil {
 		return nil, fmt.Errorf("failed to get entry file, files is nil")
 	}
-	f, exists := e.Files[filename]
-	if !exists {
-		return nil, fmt.Errorf("failed to get entry file, file not found")
+	if f, exists := e.Files[filename]; exists && !f.Deleted {
+		return f, nil
 	}
-	if f.Deleted {
+	// Fallback 1: if single active file, return it
+	if len(e.Files) == 1 {
+		for _, f := range e.Files {
+			if !f.Deleted {
+				return f, nil
+			}
+		}
+	}
+	// Fallback 2: match by normalized duplicate name or case-insensitivity
+	normTarget := utils.NormalizeDupName(filename)
+	for name, f := range e.Files {
+		if f.Deleted {
+			continue
+		}
+		if utils.NormalizeDupName(name) == normTarget || strings.EqualFold(name, filename) {
+			return f, nil
+		}
+	}
+	if f, exists := e.Files[filename]; exists && f.Deleted {
 		return nil, fmt.Errorf("file deleted")
 	}
-	return f, nil
+	return nil, fmt.Errorf("failed to get entry file, file not found")
 }
 
 // GetFileByID resolves a file by its stable ID. Entries hold few files, so a

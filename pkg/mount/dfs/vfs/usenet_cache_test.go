@@ -47,6 +47,12 @@ func (b *persistedNZBBackend) OpenStreamUntrackedForCache(context.Context, *stor
 	return nil, errors.New("persisted DFS cache unexpectedly opened an upstream stream")
 }
 
+func (b *persistedNZBBackend) IsEvicted(*storage.Entry) bool { return false }
+func (b *persistedNZBBackend) EnsureHydrated(_ context.Context, entry *storage.Entry) (*storage.Entry, error) {
+	return entry, nil
+}
+func (b *persistedNZBBackend) ProbeCovers(string, string, int64, int64, int64) bool { return false }
+
 func TestPersistedNZBUsesDFSCacheAndTracksStream(t *testing.T) {
 	const (
 		entryName = "Cached.Movie"

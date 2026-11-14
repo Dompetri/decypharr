@@ -12,14 +12,14 @@ import (
 var yearRegex = regexp.MustCompile(`(^|[^0-9])(19|20)\d{2}([^0-9]|$)`)
 
 // dupSuffixRe matches a duplicate-copy suffix "(N)" appended directly before the
-// extension (e.g. PikPak's "name(2).mkv"). The leading \S guard avoids stripping a
-// parenthesised year like "Movie (2022).mkv" (which has a space before the paren).
-var dupSuffixRe = regexp.MustCompile(`(\S)\((\d+)\)(\.[^./\\]+)?$`)
+// dupSuffixRe strips one or more duplicate copy suffixes like "(1)", "(2)", " (2) (1)"
+// while preserving 4-digit years like "(2022)" by limiting copy numbers to 1-2 digits (\d{1,2}).
+var dupSuffixRe = regexp.MustCompile(`(?:\s*\(\d{1,2}\))+\s*(\.[^./\\]+)?$`)
 
-// NormalizeDupName removes a "(N)" copy suffix: "name(2).mkv" -> "name.mkv". Used to
+// NormalizeDupName removes duplicate copy suffixes: "name (2) (1).mkv" -> "name.mkv". Used to
 // recognise the same logical file across re-add copies that a debrid (PikPak) makes.
 func NormalizeDupName(name string) string {
-	return dupSuffixRe.ReplaceAllString(name, "$1$3")
+	return dupSuffixRe.ReplaceAllString(name, "$1")
 }
 
 // HasYear reports whether name contains a parseable release year. *arr rejects a

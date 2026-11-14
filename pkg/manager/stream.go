@@ -158,7 +158,7 @@ func (m *Manager) TrackStream(entry *storage.Entry, filename, client string) str
 	}
 
 	// Mark as recently streamed so the archive sweep keeps it resident.
-	if entry.InfoHash != "" {
+	if entry.InfoHash != "" && m.lastStreamed != nil {
 		m.lastStreamed.Store(entry.InfoHash, time.Now().Unix())
 	}
 

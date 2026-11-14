@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -522,6 +523,7 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	go func() {
 		m.syncTorrents(ctx)
+		m.ReconcileCatalogOrphans()
 		// Sync NZBs
 		if err := m.syncNZBs(ctx); err != nil {
 			m.logger.Error().Err(err).Msg("Failed to perform initial NZB syncTorrents")
@@ -719,7 +721,152 @@ func (m *Manager) GetEntryByName(torrentName, filename string) (*storage.Entry, 
 	if err != nil {
 		return nil, err
 	}
-	return m.GetEntry(file.InfoHash)
+	torr, err := m.GetEntry(file.InfoHash)
+	if err != nil || torr == nil {
+		if recovered := m.recoverOrphanFromItem(entry, file.InfoHash); recovered != nil {
+			return recovered, nil
+		}
+		return nil, err
+	}
+	return torr, nil
+}
+
+func (m *Manager) defaultOrFirstProvider() string {
+	var first string
+	m.clients.Range(func(key string, _ debrid.Client) bool {
+		if first == "" {
+			first = key
+		}
+		return true
+	})
+	if first != "" {
+		return first
+	}
+	if m.config != nil && len(m.config.Debrids) > 0 {
+		return m.config.Debrids[0].Name
+	}
+	return "pikpak"
+}
+
+// recoverOrphanFromItem reconstructs an orphaned storage.Entry from a catalog EntryItem.
+// This allows entries that were pruned or missing from the entries store (e.g. after
+// debrid account changes) to be recovered on demand and re-added to the provider upon streaming.
+func (m *Manager) recoverOrphanFromItem(item *storage.EntryItem, infohash string) *storage.Entry {
+	if item == nil || infohash == "" {
+		return nil
+	}
+	provider := m.defaultOrFirstProvider()
+	now := time.Now()
+	entry := &storage.Entry{
+		Protocol:         config.ProtocolTorrent,
+		InfoHash:         infohash,
+		Name:             item.Name,
+		OriginalFilename: item.Name,
+		ActiveProvider:   provider,
+		Providers:        make(map[string]*storage.ProviderEntry),
+		Files:            make(map[string]*storage.File),
+		Status:           debridTypes.TorrentStatusDownloaded,
+		IsComplete:       true,
+		AddedOn:          now,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if magnet := utils.ConstructMagnet(infohash, item.Name); magnet != nil {
+		entry.Magnet = magnet.Link
+	}
+
+	pe := &storage.ProviderEntry{
+		Provider:  provider,
+		Status:    debridTypes.TorrentStatusDownloaded,
+		RemovedAt: &now,
+		Files:     make(map[string]*storage.ProviderFile),
+		AddedAt:   now,
+	}
+
+	var size int64
+	for name, f := range item.Files {
+		if f.InfoHash != "" && !strings.EqualFold(f.InfoHash, infohash) {
+			continue
+		}
+		entry.Files[name] = &storage.File{
+			ID:        f.ID,
+			Name:      name,
+			Size:      f.Size,
+			Deleted:   f.Deleted,
+			InfoHash:  infohash,
+			AddedOn:   f.AddedOn,
+			ByteRange: f.ByteRange,
+		}
+		pe.Files[name] = &storage.ProviderFile{}
+		size += f.Size
+	}
+	if len(entry.Files) == 0 {
+		return nil
+	}
+	entry.Size = size
+	entry.Bytes = size
+	if provider != "" {
+		entry.Providers[provider] = pe
+	}
+
+	if err := m.AddOrUpdate(entry, func(t *storage.Entry) { m.InvalidateEntryCache() }); err != nil {
+		m.logger.Warn().Err(err).Str("folder", item.Name).Str("infohash", infohash).Msg("failed to save recovered orphan entry")
+		return nil
+	}
+	m.logger.Info().Str("folder", item.Name).Str("infohash", infohash).Msg("recovered orphan entry from catalog item (will re-add to provider on stream)")
+	return entry
+}
+
+func (m *Manager) recoverOrphanByInfoHash(infohash string) *storage.Entry {
+	var matchedItem *storage.EntryItem
+	_ = m.storage.ForEachEntryItem(func(item *storage.EntryItem) error {
+		for _, f := range item.Files {
+			if strings.EqualFold(f.InfoHash, infohash) {
+				matchedItem = item
+				return fmt.Errorf("found")
+			}
+		}
+		return nil
+	})
+	if matchedItem != nil {
+		return m.recoverOrphanFromItem(matchedItem, infohash)
+	}
+	return nil
+}
+
+// ReconcileCatalogOrphans scans the name index (EntryItems) and recovers any items
+// whose infohash is missing from active storage entries.
+func (m *Manager) ReconcileCatalogOrphans() int {
+	type orphanCandidate struct {
+		item *storage.EntryItem
+		hash string
+	}
+	var candidates []orphanCandidate
+
+	_ = m.storage.ForEachEntryItem(func(item *storage.EntryItem) error {
+		for _, f := range item.Files {
+			if f == nil || f.InfoHash == "" || !looksLikeInfohash(f.InfoHash) {
+				continue
+			}
+			if ok, _ := m.EntryExists(f.InfoHash); !ok {
+				candidates = append(candidates, orphanCandidate{item: item, hash: f.InfoHash})
+				break
+			}
+		}
+		return nil
+	})
+
+	recoveredCount := 0
+	for _, c := range candidates {
+		if m.recoverOrphanFromItem(c.item, c.hash) != nil {
+			recoveredCount++
+		}
+	}
+	if recoveredCount > 0 {
+		m.logger.Info().Int("recovered", recoveredCount).Msg("reconciled missing catalog entries into orphaned storage")
+		m.InvalidateEntryCache()
+	}
+	return recoveredCount
 }
 
 func (m *Manager) AddOrUpdate(entry *storage.Entry, callback func(t *storage.Entry)) error {
@@ -740,7 +887,13 @@ func (m *Manager) AddOrUpdate(entry *storage.Entry, callback func(t *storage.Ent
 
 // GetEntry gets a torrent by name
 func (m *Manager) GetEntry(infohash string) (*storage.Entry, error) {
-	return m.storage.Get(infohash)
+	torr, err := m.storage.Get(infohash)
+	if (err != nil || torr == nil) && looksLikeInfohash(infohash) {
+		if recovered := m.recoverOrphanByInfoHash(infohash); recovered != nil {
+			return recovered, nil
+		}
+	}
+	return torr, err
 }
 
 func (m *Manager) EntryExists(infohash string) (bool, error) {

@@ -384,12 +384,34 @@ func (s *Service) fetchLink(ctx context.Context, entry *storage.Entry, filename 
 	return downloadLink, nil
 }
 
+func resolvePlacementFile(placement *storage.ProviderFile, placementFiles map[string]*storage.ProviderFile, filename string) *storage.ProviderFile {
+	if placement != nil && (placement.Link != "" || placement.Id != "") {
+		return placement
+	}
+	if len(placementFiles) == 1 {
+		for _, pf := range placementFiles {
+			if pf.Link != "" || pf.Id != "" {
+				return pf
+			}
+		}
+	}
+	normTarget := utils.NormalizeDupName(filename)
+	for name, pf := range placementFiles {
+		if utils.NormalizeDupName(name) == normTarget || strings.EqualFold(name, filename) {
+			if pf.Link != "" || pf.Id != "" {
+				return pf
+			}
+		}
+	}
+	return nil
+}
+
 // getPlacementFile retrieves the placement file with refresh fallback
 func (s *Service) getPlacementFile(entry *storage.Entry, filename string) (*storage.ProviderFile, error) {
-	_, ok := entry.Files[filename]
-	if !ok {
+	file, err := entry.GetFile(filename)
+	if err != nil {
 		return nil, NewPermanentError(
-			fmt.Errorf("file %s not found in entry", filename),
+			fmt.Errorf("file %s not found in entry %s: %w", filename, entry.Name, err),
 			"file_not_found",
 		)
 	}
@@ -402,7 +424,10 @@ func (s *Service) getPlacementFile(entry *storage.Entry, filename string) (*stor
 		)
 	}
 
-	placementFile := placement.Files[filename]
+	placementFile := resolvePlacementFile(placement.Files[filename], placement.Files, filename)
+	if placementFile == nil && file != nil {
+		placementFile = resolvePlacementFile(placement.Files[file.Name], placement.Files, file.Name)
+	}
 	if placementFile == nil || (placementFile.Link == "" && placementFile.Id == "") {
 		if s.entryRefresher == nil {
 			return nil, NewPermanentError(
@@ -425,10 +450,10 @@ func (s *Service) getPlacementFile(entry *storage.Entry, filename string) (*stor
 			)
 		}
 
-		file := refreshed.Files[filename]
-		if file == nil {
+		refreshedFile, err := refreshed.GetFile(filename)
+		if err != nil {
 			return nil, NewPermanentError(
-				fmt.Errorf("file disappeared after refresh"),
+				fmt.Errorf("file %s disappeared after refresh", filename),
 				"file_disappeared",
 			)
 		}
@@ -441,7 +466,10 @@ func (s *Service) getPlacementFile(entry *storage.Entry, filename string) (*stor
 			)
 		}
 
-		placementFile = placement.Files[filename]
+		placementFile = resolvePlacementFile(placement.Files[filename], placement.Files, filename)
+		if placementFile == nil && refreshedFile != nil {
+			placementFile = resolvePlacementFile(placement.Files[refreshedFile.Name], placement.Files, refreshedFile.Name)
+		}
 		if placementFile == nil || (placementFile.Link == "" && placementFile.Id == "") {
 			return nil, NewPermanentError(
 				fmt.Errorf("file %s not available after refresh", filename),
