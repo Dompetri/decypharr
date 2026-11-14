@@ -124,9 +124,19 @@ func (m *Manager) RebuildFromArrHistory(ctx context.Context, arrName string, dry
 				seenFolder[folder] = true
 				// A live local entry (item) means nothing to rebuild — Slice A's
 				// orphan re-hydration or the repair sweep already covers those.
-				if _, err := m.GetEntryItem(folder); err == nil {
-					report.Local++
-					continue
+				// Verify that the entry items actually exist in storage entries.
+				if item, err := m.GetEntryItem(folder); err == nil {
+					allExist := len(item.Files) > 0
+					for _, f := range item.Files {
+						if ok, _ := m.EntryExists(f.InfoHash); !ok {
+							allExist = false
+							break
+						}
+					}
+					if allExist {
+						report.Local++
+						continue
+					}
 				}
 				mediaID := content.Id // Radarr: movie id
 				if a.Type == arr.Sonarr {

@@ -12,6 +12,16 @@ import (
 // GetDownloadLink fetches and validates a download link for a file in an entry.
 // This is the public interface that delegates to the link service.
 func (m *Manager) GetDownloadLink(ctx context.Context, entry *storage.Entry, filename string) (types.DownloadLink, error) {
+	if entry == nil {
+		return types.DownloadLink{}, fmt.Errorf("entry is nil")
+	}
+	fresh, err := m.EnsureHydrated(ctx, entry)
+	if err != nil {
+		return types.DownloadLink{}, err
+	}
+	if fresh != nil && fresh != entry {
+		*entry = *fresh
+	}
 	return m.linkService.GetLink(ctx, entry, filename)
 }
 

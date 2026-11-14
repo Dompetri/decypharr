@@ -490,6 +490,12 @@ func (m *Manager) refreshTorrent(infohash string) (*storage.Entry, error) {
 		return torrent, nil
 	}
 
+	// Evicted placements or rebuilt orphans without a valid provider ID must be
+	// re-hydrated (magnet re-added) rather than queried directly from the debrid.
+	if isEvicted(torrent) || placement.ID == "" {
+		return m.EnsureHydrated(context.Background(), torrent)
+	}
+
 	// GetReader updated torrent info from debrid
 	debridTorrent, err := client.GetTorrent(placement.ID)
 	if err != nil {

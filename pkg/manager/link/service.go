@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
@@ -331,6 +332,28 @@ func (s *Service) fetchLink(ctx context.Context, entry *storage.Entry, filename 
 	// This uses account-level caching internally
 	downloadLink, err := client.GetDownloadLink(ctx, placement.ID, debridFile)
 	if err != nil {
+		if isProviderNotFoundError(err) && s.repairer != nil {
+			if entry.Bad {
+				return emptyDownloadLink, fmt.Errorf("can't repair %s since it's been marked as bad: %w", entry.GetFolder(), err)
+			}
+			if attempt >= MaxReinsertionAttempt {
+				s.markEntryBad(entry, filename, attempt, "not_found")
+				return emptyDownloadLink, fmt.Errorf("entry %s file %s not found on provider after %d re-insertion attempts: %w", entry.GetFolder(), filename, attempt, err)
+			}
+			s.logger.Warn().
+				Str("debrid", entry.ActiveProvider).
+				Str("entry", entry.Name).
+				Str("file", filename).
+				Err(err).
+				Msg("File not found on provider; attempting re-insertion")
+			if rerr := s.repairer(ctx, entry); rerr != nil {
+				return emptyDownloadLink, fmt.Errorf("failed to re-insert entry %s after provider 404: %w (original: %v)", entry.GetFolder(), rerr, err)
+			}
+			if entry.Bad {
+				return emptyDownloadLink, fmt.Errorf("entry %s still bad after repair", entry.GetFolder())
+			}
+			return s.fetchAndValidate(ctx, entry, filename, attempt+1)
+		}
 		return downloadLink, err
 	}
 
@@ -533,4 +556,14 @@ func (s *Service) invalidateAndRefetch(ctx context.Context, entry *storage.Entry
 // Clear removes all validation tracking entries
 func (s *Service) Clear() {
 	s.validated.Clear()
+}
+
+func isProviderNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "404") ||
+		strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "not_found")
 }

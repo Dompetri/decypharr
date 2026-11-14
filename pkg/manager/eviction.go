@@ -413,13 +413,13 @@ func (m *Manager) evictEntry(ctx context.Context, cfg config.Debrid, client debr
 	return nil
 }
 
-// isEvicted reports whether an entry's active placement was evicted by us.
+// isEvicted reports whether an entry's active placement was evicted by us or is an orphan.
 func isEvicted(entry *storage.Entry) bool {
 	if entry == nil {
 		return false
 	}
 	pe := entry.GetActiveProvider()
-	return pe != nil && pe.RemovedAt != nil
+	return pe != nil && (pe.RemovedAt != nil || pe.ID == "")
 }
 
 // IsEvicted is the exported form for callers outside this package (e.g. the FUSE
