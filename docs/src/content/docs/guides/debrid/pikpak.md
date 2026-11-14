@@ -9,9 +9,27 @@ magnets are downloaded into your PikPak account and then streamed by decypharr.
 
 ## Credentials
 
-PikPak authenticates with your account **username and password** (not an API
-key). Enter them in the `api_key` field using the `username:password` format.
-Your username may be the email or phone number you registered with.
+PikPak supports two authentication methods in the `api_key` field:
+
+### 1. Token / Bearer Authentication (Recommended)
+You can directly paste an OAuth2 JWT token (e.g., from PikPak AI / MCP):
+
+```json
+{
+  "debrids": [
+    {
+      "provider": "pikpak",
+      "name": "PikPak",
+      "api_key": "eyJhbGciOi...",
+      "download_uncached": true
+    }
+  ]
+}
+```
+*Note: You can also use `Bearer <token>` or `token:<token>` prefix.*
+
+### 2. Username and Password Authentication
+Alternatively, authenticate using your account **username and password** in `username:password` format. Your username may be the email or phone number you registered with:
 
 ```json
 {
