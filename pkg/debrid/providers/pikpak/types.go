@@ -107,10 +107,11 @@ type tokenResponse struct {
 
 // captchaInitRequest is the body sent to /v1/shield/captcha/init.
 type captchaInitRequest struct {
-	ClientID string            `json:"client_id"`
-	Action   string            `json:"action"`
-	DeviceID string            `json:"device_id"`
-	Meta     map[string]string `json:"meta,omitempty"`
+	ClientID    string            `json:"client_id"`
+	Action      string            `json:"action"`
+	DeviceID    string            `json:"device_id"`
+	Meta        map[string]string `json:"meta,omitempty"`
+	RedirectURI string            `json:"redirect_uri,omitempty"`
 }
 
 type captchaTokenResponse struct {

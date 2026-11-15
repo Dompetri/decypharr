@@ -28,7 +28,7 @@ import (
 const (
 	clientID      = "YNxT9w7GMdWvEOKa"
 	clientSecret  = "dbw2OtmVEeuUvIptb1Coyg"
-	clientVersion = "1.47.1"
+	clientVersion = "1.53.2"
 	packageName   = "com.pikcloud.pikpak"
 	sdkVersion    = "2.0.4.204000"
 	appName       = packageName
@@ -61,23 +61,16 @@ type folderInfo struct {
 }
 
 // md5Salts is the ordered salt chain used to compute the captcha signature.
-// The list is taken from the official client and must stay in this exact order.
+// The list is taken from the official client (v1.53.2) and must stay in this exact order.
 var md5Salts = []string{
-	"Gez0T9ijiI9WCeTsKSg3SMlx",
-	"zQdbalsolyb1R/",
-	"ftOjr52zt51JD68C3s",
-	"yeOBMH0JkbQdEFNNwQ0RI9T3wU/v",
-	"BRJrQZiTQ65WtMvwO",
-	"je8fqxKPdQVJiy1DM6Bc9Nb1",
-	"niV",
-	"9hFCW2R1",
-	"sHKHpe2i96",
-	"p7c5E6AcXQ/IJUuAEC9W6",
-	"",
-	"aRv9hjc9P+Pbn+u3krN6",
-	"BzStcgE8qVdqjEH16l4",
-	"SqgeZvL5j9zoHP95xWHt",
-	"zVof5yaJkPe3VFpadPof",
+	"SOP04dGzk0TNO7t7t9ekDbAmx+eq0OI1ovEx",
+	"nVBjhYiND4hZ2NCGyV5beamIr7k6ifAsAbl",
+	"Ddjpt5B/Cit6EDq2a6cXgxY9lkEIOw4yC1GDF28KrA",
+	"VVCogcmSNIVvgV6U+AochorydiSymi68YVNGiz",
+	"u5ujk5sM62gpJOsB/1Gu/zsfgfZO",
+	"dXYIiBOAHZgzSruaQ2Nhrqc2im",
+	"z5jUTBSIpBN9g4qSJGlidNAutX6",
+	"KJE2oveZ34du/g1tiimm",
 }
 
 var emailRe = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
@@ -204,9 +197,9 @@ func newAPIClient(httpClient *request.Client, logger zerolog.Logger, username, p
 	var deviceID string
 	if token != "" {
 		deviceID = md5Hex(token)
+	} else if username != "" {
+		deviceID = md5Hex(username)
 	} else {
-		// A stable device id per credential pair avoids re-triggering device
-		// verification on every restart.
 		deviceID = md5Hex(username + password)
 	}
 
@@ -387,14 +380,15 @@ func (c *apiClient) requestCaptcha(ctx context.Context, action string, meta map[
 	}
 
 	reqBody := captchaInitRequest{
-		ClientID: clientID,
-		Action:   action,
-		DeviceID: c.deviceID,
-		Meta:     meta,
+		ClientID:    clientID,
+		Action:      action,
+		DeviceID:    c.deviceID,
+		Meta:        meta,
+		RedirectURI: "xlaccsdk01://xbase.cloud/callback?state=harbor",
 	}
 
 	var resp captchaTokenResponse
-	if err := c.rawCall(ctx, http.MethodPost, userHost+"/v1/shield/captcha/init", nil, reqBody, c.baseHeaders(), &resp); err != nil {
+	if err := c.rawCall(ctx, http.MethodPost, userHost+"/v1/shield/captcha/init?client_id="+clientID, nil, reqBody, c.baseHeaders(), &resp); err != nil {
 		return "", 0, err
 	}
 	if resp.CaptchaToken == "" {
@@ -456,14 +450,8 @@ func (c *apiClient) loginLocked(ctx context.Context) error {
 		return fmt.Errorf("pikpak: username and password are required")
 	}
 
-	meta := map[string]string{}
-	switch {
-	case emailRe.MatchString(c.username):
-		meta["email"] = c.username
-	case phoneRe.MatchString(c.username):
-		meta["phone_number"] = c.username
-	default:
-		meta["username"] = c.username
+	meta := map[string]string{
+		"username": c.username,
 	}
 
 	captcha, _, err := c.requestCaptcha(ctx, "POST:"+userHost+"/v1/auth/signin", meta)
@@ -477,6 +465,7 @@ func (c *apiClient) loginLocked(ctx context.Context) error {
 		"username":      c.username,
 		"password":      c.password,
 		"captcha_token": captcha,
+		"grant_type":    "password",
 	}
 	headers := c.baseHeaders()
 	headers["X-Captcha-Token"] = captcha

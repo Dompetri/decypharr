@@ -357,3 +357,27 @@ func TestRefreshWebToken(t *testing.T) {
 		t.Errorf("expected tokenExpiry around 7200s in future, got %v", client.tokenExpiry)
 	}
 }
+
+func TestLiveAndroidLogin(t *testing.T) {
+	username := os.Getenv("PIKPAK_USER")
+	password := os.Getenv("PIKPAK_PASS")
+	if username == "" || password == "" {
+		t.Skip("skipping live test; set PIKPAK_USER and PIKPAK_PASS to run")
+	}
+
+	config.SetConfigPath(t.TempDir())
+	client := newAPIClient(request.New(), zerolog.Nop(), username, password, "", "")
+	if err := client.loginLocked(t.Context()); err != nil {
+		t.Fatalf("live login failed: %v", err)
+	}
+	if client.accessToken == "" {
+		t.Fatalf("expected non-empty access token after login")
+	}
+	t.Logf("Live login successful! AccessToken: %s...", client.accessToken[:20])
+
+	res, err := client.addOfflineDownload(t.Context(), "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Babygirl", "Babygirl")
+	if err != nil {
+		t.Fatalf("live addOfflineDownload failed: %v", err)
+	}
+	t.Logf("Live addOfflineDownload SUCCESS! TaskID: %s, FileName: %s", res.Task.ID, res.Task.FileName)
+}
