@@ -11,6 +11,8 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/request"
+	"github.com/sirrobot01/decypharr/internal/utils"
+	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 )
 
 func TestActionFor(t *testing.T) {
@@ -397,6 +399,60 @@ func TestFolderNameFor(t *testing.T) {
 		if got := folderNameFor(tt.fileName, tt.releaseName); got != tt.want {
 			t.Errorf("folderNameFor(%q, %q) = %q; want %q", tt.fileName, tt.releaseName, got, tt.want)
 		}
+	}
+}
+
+func TestSubmitMagnetReusesExistingTorrent(t *testing.T) {
+	p := &Pikpak{
+		logger: zerolog.Nop(),
+		config: config.Debrid{Name: "pikpak"},
+		torrentsCache: map[string]*types.Torrent{
+			"315e9949ae52315f1d65871ed1de70ddcec282ff": {
+				Id:       "existing-rover-id",
+				InfoHash: "315e9949ae52315f1d65871ed1de70ddcec282ff",
+				Name:     "Rover.2014.P.BDRemux(13).1080p",
+				Status:   types.TorrentStatusDownloaded,
+				Files: map[string]types.File{
+					"Rover.2014.P.BDRemux.1080p.mkv": {
+						Id:   "existing-rover-id",
+						Name: "Rover.2014.P.BDRemux.1080p.mkv",
+						Size: 16616342032,
+					},
+				},
+			},
+		},
+		cacheExpiry: time.Now().Add(10 * time.Minute),
+	}
+
+	roverMagnet, err := utils.GetMagnetInfo("magnet:?xt=urn:btih:315e9949ae52315f1d65871ed1de70ddcec282ff&dn=Rover.2014.P.BDRemux.1080p", false)
+	if err != nil {
+		t.Fatalf("GetMagnetInfo failed: %v", err)
+	}
+
+	tr, err := p.SubmitMagnet(&types.Torrent{
+		InfoHash: "315e9949ae52315f1d65871ed1de70ddcec282ff",
+		Name:     "Rover.2014.P.BDRemux.1080p",
+		Magnet:   roverMagnet,
+		Files:    make(map[string]types.File),
+	})
+	if err != nil {
+		t.Fatalf("SubmitMagnet failed: %v", err)
+	}
+
+	if tr.Id != "existing-rover-id" {
+		t.Errorf("expected reused Id 'existing-rover-id', got %q", tr.Id)
+	}
+	if tr.Name != "Rover.2014.P.BDRemux.1080p" {
+		t.Errorf("expected clean folder name 'Rover.2014.P.BDRemux.1080p', got %q", tr.Name)
+	}
+	if tr.Status != types.TorrentStatusDownloaded {
+		t.Errorf("expected status downloaded, got %s", tr.Status)
+	}
+	if len(tr.Files) != 1 {
+		t.Errorf("expected 1 file, got %d", len(tr.Files))
+	}
+	if _, ok := tr.Files["Rover.2014.P.BDRemux.1080p.mkv"]; !ok {
+		t.Errorf("missing expected file Rover.2014.P.BDRemux.1080p.mkv")
 	}
 }
 

@@ -997,8 +997,21 @@ func (c *apiClient) deleteTask(ctx context.Context, taskID string, deleteFiles b
 
 // batchDelete permanently deletes files/folders by id.
 func (c *apiClient) batchDelete(ctx context.Context, ids []string) error {
-	body := map[string]any{"ids": ids}
-	return c.authCall(ctx, http.MethodPost, apiHost+"/drive/v1/files:batchDelete", nil, body, nil)
+	if len(ids) == 0 {
+		return nil
+	}
+	const batchSize = 50
+	for i := 0; i < len(ids); i += batchSize {
+		end := i + batchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		body := map[string]any{"ids": ids[i:end]}
+		if err := c.authCall(ctx, http.MethodPost, apiHost+"/drive/v1/files:batchDelete", nil, body, nil); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // getAbout returns drive quota information.

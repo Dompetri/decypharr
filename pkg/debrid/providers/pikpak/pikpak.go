@@ -52,6 +52,10 @@ type Pikpak struct {
 
 	profile   *types.Profile
 	profileMu sync.Mutex
+
+	torrentsMu    sync.RWMutex
+	torrentsCache map[string]*types.Torrent
+	cacheExpiry   time.Time
 }
 
 // infohashFromMagnet extracts the lowercase BitTorrent infohash from a magnet URL.
@@ -190,6 +194,46 @@ func (p *Pikpak) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
 	}
 
 	ctx := context.Background()
+
+	// Prevent duplicates: if this torrent already exists on PikPak or is downloading,
+	// reuse the existing item instead of submitting again and creating duplicate (1), (2) copies.
+	infohash := strings.ToLower(torrent.InfoHash)
+	if infohash == "" && torrent.Magnet != nil {
+		infohash = strings.ToLower(torrent.Magnet.InfoHash)
+	}
+	if infohash == "" && torrent.Magnet != nil {
+		infohash = infohashFromMagnet(torrent.Magnet.Link)
+	}
+
+	if existing := p.findExistingTorrent(ctx, infohash, name); existing != nil {
+		p.logger.Info().
+			Str("id", existing.Id).
+			Str("infohash", infohash).
+			Str("name", existing.Name).
+			Msg("pikpak: torrent already exists on provider, reusing existing copy")
+
+		torrent.Id = existing.Id
+		folderName := folderNameFor(existing.Name, name)
+		if folderName != "" {
+			torrent.Name = folderName
+			torrent.Filename = folderName
+			torrent.OriginalFilename = folderName
+		} else {
+			torrent.Name = existing.Name
+			torrent.Filename = existing.Filename
+			torrent.OriginalFilename = existing.OriginalFilename
+		}
+		torrent.Debrid = p.config.Name
+		torrent.Status = existing.Status
+		torrent.Added = existing.Added
+		if len(existing.Files) > 0 {
+			torrent.Files = existing.Files
+		} else {
+			_ = p.refresh(ctx, torrent)
+		}
+		return torrent, nil
+	}
+
 	resp, err := p.client.addOfflineDownload(ctx, torrent.Magnet.Link, name)
 	if err != nil {
 		return nil, err
@@ -240,7 +284,94 @@ func (p *Pikpak) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
 	torrent.Debrid = p.config.Name
 	torrent.Added = time.Now()
 
+	p.torrentsMu.Lock()
+	if p.torrentsCache != nil && infohash != "" {
+		p.torrentsCache[infohash] = torrent
+	}
+	p.torrentsMu.Unlock()
+
 	return torrent, nil
+}
+
+// findExistingTorrent checks whether a torrent (by infohash or release name)
+// already exists on the user's PikPak drive or is currently being downloaded.
+func (p *Pikpak) findExistingTorrent(ctx context.Context, infohash, name string) *types.Torrent {
+	if infohash == "" && name == "" {
+		return nil
+	}
+
+	// 1. Check in-memory torrents cache (populated by GetTorrents / sync)
+	p.torrentsMu.RLock()
+	cacheValid := time.Now().Before(p.cacheExpiry) && len(p.torrentsCache) > 0
+	if cacheValid {
+		if t := p.matchTorrent(infohash, name, p.torrentsCache); t != nil {
+			p.torrentsMu.RUnlock()
+			return t
+		}
+	}
+	p.torrentsMu.RUnlock()
+
+	// 2. Check running/pending offline download tasks
+	if tasks, err := p.client.listOfflineTasks(ctx); err == nil {
+		normName := utils.NormalizeDupName(name)
+		for _, tk := range tasks {
+			if tk.Phase == phaseError {
+				continue
+			}
+			matchesName := normName != "" && (utils.NormalizeDupName(tk.Name) == normName || utils.NormalizeDupName(tk.FileName) == normName)
+			if matchesName {
+				fileID := tk.FileID
+				if fileID == "" {
+					resolved, _, werr := p.waitForFileID(ctx, tk.ID)
+					if werr == nil && resolved != "" {
+						fileID = resolved
+					}
+				}
+				if fileID != "" {
+					t := &types.Torrent{
+						Id:       fileID,
+						InfoHash: infohash,
+						Name:     tk.Name,
+						Status:   types.TorrentStatusDownloading,
+						Progress: float64(tk.Progress),
+						Debrid:   p.config.Name,
+						Files:    make(map[string]types.File),
+					}
+					return t
+				}
+			}
+		}
+	}
+
+	// 3. If cache was expired or didn't have it, refresh drive torrents and recheck
+	torrents, err := p.GetTorrents()
+	if err == nil && len(torrents) > 0 {
+		p.torrentsMu.RLock()
+		defer p.torrentsMu.RUnlock()
+		return p.matchTorrent(infohash, name, p.torrentsCache)
+	}
+
+	return nil
+}
+
+func (p *Pikpak) matchTorrent(infohash, name string, cache map[string]*types.Torrent) *types.Torrent {
+	if infohash != "" {
+		if t, ok := cache[infohash]; ok && t != nil && t.Status != types.TorrentStatusError {
+			return t
+		}
+	}
+	if name != "" {
+		normTarget := utils.NormalizeDupName(name)
+		for _, t := range cache {
+			if t == nil || t.Status == types.TorrentStatusError {
+				continue
+			}
+			if utils.NormalizeDupName(t.Name) == normTarget {
+				return t
+			}
+		}
+	}
+	return nil
 }
 
 // extensionFromMime maps a MIME type to a known media file extension (.mkv, .mp4, etc.)
@@ -849,6 +980,10 @@ func (p *Pikpak) GetTorrents() ([]*types.Torrent, error) {
 	for _, t := range seen {
 		result = append(result, t)
 	}
+	p.torrentsMu.Lock()
+	p.torrentsCache = seen
+	p.cacheExpiry = time.Now().Add(1 * time.Minute)
+	p.torrentsMu.Unlock()
 	return result, nil
 }
 
