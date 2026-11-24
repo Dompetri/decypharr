@@ -243,17 +243,56 @@ func (p *Pikpak) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
 	return torrent, nil
 }
 
+// extensionFromMime maps a MIME type to a known media file extension (.mkv, .mp4, etc.)
+// when PikPak fails to provide a file extension for single-file downloads.
+func extensionFromMime(mimeType string) string {
+	if idx := strings.Index(mimeType, ";"); idx != -1 {
+		mimeType = mimeType[:idx]
+	}
+	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	case "video/x-matroska":
+		return ".mkv"
+	case "video/mp4":
+		return ".mp4"
+	case "video/quicktime":
+		return ".mov"
+	case "video/x-msvideo":
+		return ".avi"
+	case "video/webm":
+		return ".webm"
+	case "video/x-flv":
+		return ".flv"
+	case "video/mpeg":
+		return ".mpg"
+	case "video/x-ms-wmv":
+		return ".wmv"
+	case "audio/mpeg":
+		return ".mp3"
+	case "audio/x-flac", "audio/flac":
+		return ".flac"
+	case "audio/ogg":
+		return ".ogg"
+	case "application/x-subrip", "text/vtt":
+		return ".srt"
+	default:
+		return ""
+	}
+}
+
 // folderNameFor picks the folder/torrent name: the clean PikPak file name when it
 // already has a parseable year, otherwise the release name (magnet dn) which does.
+// Duplicate copy suffixes like "(1)", "(13)" are stripped.
 // The result is sanitized into a single safe path component.
 func folderNameFor(fileName, releaseName string) string {
-	if fileName != "" && (utils.HasYear(fileName) || strings.TrimSpace(releaseName) == "") {
-		return utils.SafeFolderName(fileName)
+	cleanFile := utils.NormalizeDupName(fileName)
+	cleanRelease := utils.NormalizeDupName(releaseName)
+	if cleanFile != "" && (utils.HasYear(cleanFile) || strings.TrimSpace(cleanRelease) == "") {
+		return utils.SafeFolderName(cleanFile)
 	}
-	if name := utils.SafeFolderName(releaseName); name != "" {
+	if name := utils.SafeFolderName(cleanRelease); name != "" {
 		return name
 	}
-	return utils.SafeFolderName(fileName)
+	return utils.SafeFolderName(cleanFile)
 }
 
 // waitForFileID polls a freshly created offline task until PikPak assigns the
@@ -352,13 +391,22 @@ func (p *Pikpak) collectFilesInto(ctx context.Context, parentID, prefix, torrent
 				}
 				continue
 			}
-			if err := cfg.ValidateFileAllowed(relPath, child.Size); err != nil {
-				continue
+			cleanRel := utils.NormalizeDupName(relPath)
+			effectiveName := cleanRel
+			if err := cfg.ValidateFileAllowed(effectiveName, child.Size); err != nil {
+				if ext := extensionFromMime(child.MimeType); ext != "" {
+					if cfg.ValidateFileAllowed(effectiveName+ext, child.Size) == nil {
+						effectiveName = effectiveName + ext
+					} else {
+						continue
+					}
+				} else {
+					continue
+				}
 			}
 			// Collapse "(N)" re-add copies to one clean entry; keep the newest. Distinct
 			// files of a multi-file torrent have different names, so they don't collide.
-			cleanRel := utils.NormalizeDupName(relPath)
-			name := filepath.Base(cleanRel)
+			name := filepath.Base(effectiveName)
 			if prevTime, ok := created[name]; ok && child.CreatedTime <= prevTime {
 				continue
 			}
@@ -368,7 +416,7 @@ func (p *Pikpak) collectFilesInto(ctx context.Context, parentID, prefix, torrent
 				Id:        child.ID,
 				Name:      name,
 				Size:      child.Size,
-				Path:      cleanRel,
+				Path:      effectiveName,
 				Link:      "pikpak://" + child.ID,
 			}
 		}
@@ -464,18 +512,26 @@ func (p *Pikpak) refresh(ctx context.Context, t *types.Torrent) error {
 			return err
 		}
 	} else {
-		if cfg.ValidateFileAllowed(file.Name, file.Size) == nil {
-			// Strip any "(N)" re-add suffix so the entry name is stable across re-adds
-			// (PikPak hands a different copy each time); the Link still points at this
-			// specific physical file.
-			clean := utils.NormalizeDupName(file.Name)
-			name := filepath.Base(clean)
+		// Strip any "(N)" re-add suffix so the entry name is stable across re-adds
+		// (PikPak hands a different copy each time); the Link still points at this
+		// specific physical file.
+		clean := utils.NormalizeDupName(file.Name)
+		effectiveName := clean
+		if cfg.ValidateFileAllowed(effectiveName, file.Size) != nil {
+			if ext := extensionFromMime(file.MimeType); ext != "" {
+				if cfg.ValidateFileAllowed(effectiveName+ext, file.Size) == nil {
+					effectiveName = effectiveName + ext
+				}
+			}
+		}
+		if cfg.ValidateFileAllowed(effectiveName, file.Size) == nil {
+			name := filepath.Base(effectiveName)
 			t.Files[name] = types.File{
 				TorrentId: t.Id,
 				Id:        file.ID,
 				Name:      name,
 				Size:      file.Size,
-				Path:      clean,
+				Path:      effectiveName,
 				Link:      "pikpak://" + file.ID,
 			}
 		}

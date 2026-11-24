@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -355,6 +356,47 @@ func TestRefreshWebToken(t *testing.T) {
 	}
 	if client.tokenExpiry.Before(time.Now().Add(7100 * time.Second)) {
 		t.Errorf("expected tokenExpiry around 7200s in future, got %v", client.tokenExpiry)
+	}
+}
+
+func TestExtensionFromMime(t *testing.T) {
+	tests := []struct {
+		mime string
+		want string
+	}{
+		{"video/x-matroska", ".mkv"},
+		{"video/x-matroska; codecs=hevc", ".mkv"},
+		{"VIDEO/MP4", ".mp4"},
+		{"video/quicktime", ".mov"},
+		{"video/x-msvideo", ".avi"},
+		{"video/webm", ".webm"},
+		{"audio/mpeg", ".mp3"},
+		{"audio/flac", ".flac"},
+		{"application/x-subrip", ".srt"},
+		{"application/octet-stream", ""},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		if got := extensionFromMime(tt.mime); got != tt.want {
+			t.Errorf("extensionFromMime(%q) = %q; want %q", tt.mime, got, tt.want)
+		}
+	}
+}
+
+func TestFolderNameFor(t *testing.T) {
+	tests := []struct {
+		fileName    string
+		releaseName string
+		want        string
+	}{
+		{"Rover.2014.P.BDRemux(13).1080p", "Rover.2014.P.BDRemux.1080p", "Rover.2014.P.BDRemux.1080p"},
+		{"Movie (1).2024", "", "Movie.2024"},
+		{"Resident.Evil.2002.HYBRID(16).DoVi", "Resident.Evil.2002.HYBRID.DoVi", "Resident.Evil.2002.HYBRID.DoVi"},
+	}
+	for _, tt := range tests {
+		if got := folderNameFor(tt.fileName, tt.releaseName); got != tt.want {
+			t.Errorf("folderNameFor(%q, %q) = %q; want %q", tt.fileName, tt.releaseName, got, tt.want)
+		}
 	}
 }
 

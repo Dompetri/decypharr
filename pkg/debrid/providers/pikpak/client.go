@@ -969,12 +969,30 @@ func (c *apiClient) listOfflineTasks(ctx context.Context) ([]*pikpakTask, error)
 	return tl.Tasks, nil
 }
 
+// deleteTasks removes offline download tasks in batches.
+func (c *apiClient) deleteTasks(ctx context.Context, taskIDs []string, deleteFiles bool) error {
+	if len(taskIDs) == 0 {
+		return nil
+	}
+	const batchSize = 50
+	for i := 0; i < len(taskIDs); i += batchSize {
+		end := i + batchSize
+		if end > len(taskIDs) {
+			end = len(taskIDs)
+		}
+		params := url.Values{}
+		params.Set("task_ids", strings.Join(taskIDs[i:end], ","))
+		params.Set("delete_files", fmt.Sprintf("%t", deleteFiles))
+		if err := c.authCall(ctx, http.MethodDelete, apiHost+"/drive/v1/tasks", params, nil, nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // deleteTask removes an offline download task (optionally its files).
 func (c *apiClient) deleteTask(ctx context.Context, taskID string, deleteFiles bool) error {
-	params := url.Values{}
-	params.Set("task_ids", taskID)
-	params.Set("delete_files", fmt.Sprintf("%t", deleteFiles))
-	return c.authCall(ctx, http.MethodDelete, apiHost+"/drive/v1/tasks", params, nil, nil)
+	return c.deleteTasks(ctx, []string{taskID}, deleteFiles)
 }
 
 // batchDelete permanently deletes files/folders by id.
