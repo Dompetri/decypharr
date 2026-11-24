@@ -454,6 +454,13 @@ func TestSubmitMagnetReusesExistingTorrent(t *testing.T) {
 	if _, ok := tr.Files["Rover.2014.P.BDRemux.1080p.mkv"]; !ok {
 		t.Errorf("missing expected file Rover.2014.P.BDRemux.1080p.mkv")
 	}
+
+	// Verify that an upgraded release with a DIFFERENT infohash is NOT reused
+	upgradedHash := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	existingMatch := p.findExistingTorrent(t.Context(), upgradedHash)
+	if existingMatch != nil {
+		t.Errorf("expected upgraded release with different infohash to NOT match existing torrent, got %+v", existingMatch)
+	}
 }
 
 func TestLiveAndroidLogin(t *testing.T) {

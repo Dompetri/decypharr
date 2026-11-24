@@ -195,7 +195,7 @@ func (p *Pikpak) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
 
 	ctx := context.Background()
 
-	// Prevent duplicates: if this torrent already exists on PikPak or is downloading,
+	// Prevent duplicates: if this exact torrent (by infohash) already exists on PikPak,
 	// reuse the existing item instead of submitting again and creating duplicate (1), (2) copies.
 	infohash := strings.ToLower(torrent.InfoHash)
 	if infohash == "" && torrent.Magnet != nil {
@@ -205,7 +205,7 @@ func (p *Pikpak) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
 		infohash = infohashFromMagnet(torrent.Magnet.Link)
 	}
 
-	if existing := p.findExistingTorrent(ctx, infohash, name); existing != nil {
+	if existing := p.findExistingTorrent(ctx, infohash); existing != nil {
 		p.logger.Info().
 			Str("id", existing.Id).
 			Str("infohash", infohash).
@@ -293,10 +293,10 @@ func (p *Pikpak) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
 	return torrent, nil
 }
 
-// findExistingTorrent checks whether a torrent (by infohash or release name)
-// already exists on the user's PikPak drive or is currently being downloaded.
-func (p *Pikpak) findExistingTorrent(ctx context.Context, infohash, name string) *types.Torrent {
-	if infohash == "" && name == "" {
+// findExistingTorrent checks whether the exact torrent (by infohash)
+// already exists on the user's PikPak drive.
+func (p *Pikpak) findExistingTorrent(ctx context.Context, infohash string) *types.Torrent {
+	if infohash == "" {
 		return nil
 	}
 
@@ -304,73 +304,25 @@ func (p *Pikpak) findExistingTorrent(ctx context.Context, infohash, name string)
 	p.torrentsMu.RLock()
 	cacheValid := time.Now().Before(p.cacheExpiry) && len(p.torrentsCache) > 0
 	if cacheValid {
-		if t := p.matchTorrent(infohash, name, p.torrentsCache); t != nil {
+		if t, ok := p.torrentsCache[infohash]; ok && t != nil && t.Status != types.TorrentStatusError {
 			p.torrentsMu.RUnlock()
 			return t
 		}
 	}
 	p.torrentsMu.RUnlock()
 
-	// 2. Check running/pending offline download tasks
-	if tasks, err := p.client.listOfflineTasks(ctx); err == nil {
-		normName := utils.NormalizeDupName(name)
-		for _, tk := range tasks {
-			if tk.Phase == phaseError {
-				continue
-			}
-			matchesName := normName != "" && (utils.NormalizeDupName(tk.Name) == normName || utils.NormalizeDupName(tk.FileName) == normName)
-			if matchesName {
-				fileID := tk.FileID
-				if fileID == "" {
-					resolved, _, werr := p.waitForFileID(ctx, tk.ID)
-					if werr == nil && resolved != "" {
-						fileID = resolved
-					}
-				}
-				if fileID != "" {
-					t := &types.Torrent{
-						Id:       fileID,
-						InfoHash: infohash,
-						Name:     tk.Name,
-						Status:   types.TorrentStatusDownloading,
-						Progress: float64(tk.Progress),
-						Debrid:   p.config.Name,
-						Files:    make(map[string]types.File),
-					}
-					return t
-				}
-			}
-		}
-	}
-
-	// 3. If cache was expired or didn't have it, refresh drive torrents and recheck
-	torrents, err := p.GetTorrents()
-	if err == nil && len(torrents) > 0 {
-		p.torrentsMu.RLock()
-		defer p.torrentsMu.RUnlock()
-		return p.matchTorrent(infohash, name, p.torrentsCache)
-	}
-
-	return nil
-}
-
-func (p *Pikpak) matchTorrent(infohash, name string, cache map[string]*types.Torrent) *types.Torrent {
-	if infohash != "" {
-		if t, ok := cache[infohash]; ok && t != nil && t.Status != types.TorrentStatusError {
-			return t
-		}
-	}
-	if name != "" {
-		normTarget := utils.NormalizeDupName(name)
-		for _, t := range cache {
-			if t == nil || t.Status == types.TorrentStatusError {
-				continue
-			}
-			if utils.NormalizeDupName(t.Name) == normTarget {
+	// 2. If cache was expired or didn't have it, refresh drive torrents and recheck
+	if p.client != nil {
+		torrents, err := p.GetTorrents()
+		if err == nil && len(torrents) > 0 {
+			p.torrentsMu.RLock()
+			defer p.torrentsMu.RUnlock()
+			if t, ok := p.torrentsCache[infohash]; ok && t != nil && t.Status != types.TorrentStatusError {
 				return t
 			}
 		}
 	}
+
 	return nil
 }
 
